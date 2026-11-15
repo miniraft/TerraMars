@@ -20,7 +20,7 @@ env:
 
 jobs:
   build:
-    name: Rust / ${{ matrix.platform }}
+    name: Rust / ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
@@ -29,10 +29,27 @@ jobs:
         include:
           - platform: linux
             runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - platform: linux
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
           - platform: macos
             runner: macos-15
+            target: aarch64-apple-darwin
+            macos_deployment_target: '11.0'
+          - platform: macos
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            macos_deployment_target: '10.15'
           - platform: windows
             runner: windows-2022
+            target: x86_64-pc-windows-msvc
+          - platform: windows
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.macos_deployment_target || '10.15' }}
 
     steps:
       - name: Check out project
@@ -61,9 +78,13 @@ jobs:
       - name: Install pinned Rust toolchain
         shell: bash
         run: |
+          # Select native ARM64 tools even if the image preinstalls x64 rustup.
+          rustup set default-host ${{ matrix.target }}
           rustup show
+          rustup target add ${{ matrix.target }}
           rustc --version
           cargo --version
+          rustc -vV | grep -Fx 'host: ${{ matrix.target }}'
 
       - name: Cache Rust dependencies
         uses: actions/cache@v5
@@ -72,26 +93,26 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-${{ github.sha }}
+          key: rust-${{ matrix.target }}-${{ matrix.macos_deployment_target }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', '.cargo/config.toml') }}-${{ github.sha }}
           restore-keys: |
-            rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
+            rust-${{ matrix.target }}-${{ matrix.macos_deployment_target }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', '.cargo/config.toml') }}-
 
       - name: Check formatting
         # Keep the vendored upstream compatibility patch independent of style changes.
         run: cargo fmt --package terramars -- --check
 
       - name: Check Rust code
-        run: cargo clippy --locked --release --all-targets -- -D warnings
+        run: cargo clippy --locked --release --target ${{ matrix.target }} --all-targets -- -D warnings
 
       - name: Test calculations and application state
-        run: cargo test --locked --release --all-targets
+        run: cargo test --locked --release --target ${{ matrix.target }} --all-targets
 
       - name: Build Rust desktop application
-        run: cargo build --locked --release --bin terramars
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin terramars
 
       - name: Package native application
         shell: bash
-        run: python3 tools/package_desktop.py --platform ${{ matrix.platform }}
+        run: python3 tools/package_desktop.py --platform ${{ matrix.platform }} --binary-dir target/${{ matrix.target }}/release
 
       - name: Upload native application
         uses: actions/upload-artifact@v7

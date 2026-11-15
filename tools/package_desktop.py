@@ -12,6 +12,19 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import tomllib
+
+
+def macos_minimum_version(root: Path, arch: str) -> str:
+    """Use Cargo's deployment target for the bundle, including local builds."""
+    config = tomllib.loads((root / ".cargo/config.toml").read_text())
+    version = os.environ.get(
+        "MACOSX_DEPLOYMENT_TARGET", config["env"]["MACOSX_DEPLOYMENT_TARGET"]
+    )
+    # Apple Silicon has never supported macOS versions before Big Sur.
+    if arch == "arm64" and tuple(map(int, version.split("."))) < (11, 0):
+        return "11.0"
+    return version
 
 
 def macos_icon(source: Path, destination: Path) -> None:
@@ -73,7 +86,7 @@ def package(target: str, binary_dir: Path, output: Path) -> Path:
             "CFBundleShortVersionString": "0.2.0",
             "CFBundleVersion": "1",
             "NSHighResolutionCapable": True,
-            "LSMinimumSystemVersion": "11.0",
+            "LSMinimumSystemVersion": macos_minimum_version(root, arch),
         }
         with (contents / "Info.plist").open("wb") as stream:
             plistlib.dump(metadata, stream)

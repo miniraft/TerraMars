@@ -1,2 +1,7 @@
 [build]
 jobs = 2
+
+[env]
+# GPUI's native macOS backend supports Catalina. Rust raises the ARM64 floor
+# to 11.0; CI sets that explicitly when building the Apple Silicon app.
+MACOSX_DEPLOYMENT_TARGET = "10.15"
