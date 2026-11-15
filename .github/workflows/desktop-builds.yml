@@ -96,8 +96,8 @@ jobs:
       - name: Upload native application
         uses: actions/upload-artifact@v7
         with:
-          name: TerraMars-${{ matrix.platform }}-${{ runner.arch }}
           path: dist/TerraMars-*
+          # v7 uploads the single native file directly, without a ZIP wrapper.
+          archive: false
           if-no-files-found: error
           retention-days: 14
-          compression-level: 0

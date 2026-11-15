@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package a compiled TerraMars binary using the Python standard library."""
+"""Produce one executable for Linux/Windows, or a macOS DMG containing the app."""
 
 from __future__ import annotations
 
@@ -11,9 +11,7 @@ import plistlib
 import shutil
 import stat
 import subprocess
-import tarfile
 import tempfile
-import zipfile
 
 
 def macos_icon(source: Path, destination: Path) -> None:
@@ -44,44 +42,45 @@ def package(target: str, binary_dir: Path, output: Path) -> Path:
     output.mkdir(parents=True, exist_ok=True)
     arch = platform.machine().lower()
     arch = {"amd64": "x86_64", "aarch64": "arm64"}.get(arch, arch)
-    suffix = ".zip" if target == "windows" else ".tar.gz"
-    archive = output / f"TerraMars-{target}-{arch}{suffix}"
+    suffix = {"linux": "", "windows": ".exe", "macos": ".dmg"}[target]
+    artifact = output / f"TerraMars-{target}-{arch}{suffix}"
+
+    # Application assets, shaders and license notices are embedded in the binary.
+    if target != "macos":
+        shutil.copy2(binary, artifact)
+        if target == "linux":
+            artifact.chmod(artifact.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        return artifact
+    if platform.system() != "Darwin":
+        raise SystemExit("macOS DMG packaging requires a macOS host with hdiutil.")
 
     with tempfile.TemporaryDirectory(prefix="terramars-package-") as directory:
         staging = Path(directory)
-        bundle = staging / ("TerraMars.app" if target == "macos" else "TerraMars")
-        if target == "macos":
-            contents = bundle / "Contents"
-            executable_dir = contents / "MacOS"
-            resources = contents / "Resources"
-            executable_dir.mkdir(parents=True)
-            resources.mkdir(parents=True)
-            macos_icon(root / "assets/icons/app_logo/logo.png", resources / "TerraMars.icns")
-            metadata = {
-                "CFBundleName": "TerraMars",
-                "CFBundleDisplayName": "TerraMars",
-                "CFBundleExecutable": "terramars",
-                "CFBundleIdentifier": "org.terramars.app",
-                "CFBundlePackageType": "APPL",
-                "CFBundleIconFile": "TerraMars.icns",
-                "CFBundleShortVersionString": "0.2.0",
-                "CFBundleVersion": "1",
-                "NSHighResolutionCapable": True,
-                "LSMinimumSystemVersion": "11.0",
-            }
-            with (contents / "Info.plist").open("wb") as stream:
-                plistlib.dump(metadata, stream)
-            (contents / "PkgInfo").write_bytes(b"APPL????")
-        else:
-            bundle.mkdir(parents=True)
-            executable_dir = resources = bundle
-            if target == "linux":
-                shutil.copy2(root / "assets/icons/app_logo/logo_small.png", resources / "org.terramars.app.png")
-
+        bundle = staging / "TerraMars.app"
+        contents = bundle / "Contents"
+        executable_dir = contents / "MacOS"
+        resources = contents / "Resources"
+        executable_dir.mkdir(parents=True)
+        resources.mkdir(parents=True)
+        macos_icon(root / "assets/icons/app_logo/logo.png", resources / "TerraMars.icns")
+        metadata = {
+            "CFBundleName": "TerraMars",
+            "CFBundleDisplayName": "TerraMars",
+            "CFBundleExecutable": "terramars",
+            "CFBundleIdentifier": "org.terramars.app",
+            "CFBundlePackageType": "APPL",
+            "CFBundleIconFile": "TerraMars.icns",
+            "CFBundleShortVersionString": "0.2.0",
+            "CFBundleVersion": "1",
+            "NSHighResolutionCapable": True,
+            "LSMinimumSystemVersion": "11.0",
+        }
+        with (contents / "Info.plist").open("wb") as stream:
+            plistlib.dump(metadata, stream)
+        (contents / "PkgInfo").write_bytes(b"APPL????")
         destination = executable_dir / binary.name
         shutil.copy2(binary, destination)
-        if target != "windows":
-            destination.chmod(destination.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        destination.chmod(destination.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         for name in ("README.md", "docs", "tools/voice_bridge.py", "tools/voice-requirements.txt", "vendor/GPUI_PATCHES.md", "vendor/rotation.patch"):
             source = root / name
             dest = resources / name
@@ -110,18 +109,14 @@ def package(target: str, binary_dir: Path, output: Path) -> Path:
         # GPUI's compiled shaders and application assets are embedded in the binary.
         # Ad-hoc signing makes the local bundle structurally valid on Apple Silicon;
         # this does not replace Developer ID signing or notarization.
-        if target == "macos" and platform.system() == "Darwin":
-            subprocess.run(["codesign", "--force", "--deep", "--sign", "-", os.fspath(bundle)], check=True)
-        if target == "windows":
-            # crates.io source files can carry Unix-epoch mtimes; ZIP starts at 1980.
-            with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, strict_timestamps=False) as stream:
-                for path in sorted(bundle.rglob("*")):
-                    if path.is_file():
-                        stream.write(path, path.relative_to(staging))
-        else:
-            with tarfile.open(archive, "w:gz") as stream:
-                stream.add(bundle, arcname=bundle.name)
-    return archive
+        subprocess.run(["codesign", "--force", "--deep", "--sign", "-", os.fspath(bundle)], check=True)
+        (staging / "Applications").symlink_to("/Applications", target_is_directory=True)
+        subprocess.run(
+            ["hdiutil", "create", "-volname", "TerraMars", "-srcfolder",
+             os.fspath(staging), "-format", "UDZO", "-ov", os.fspath(artifact)],
+            check=True,
+        )
+    return artifact
 
 
 if __name__ == "__main__":
