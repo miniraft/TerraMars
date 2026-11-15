@@ -806,7 +806,7 @@ impl TerraMars {
             .px_4()
             .h(px(82.))
             .flex_shrink_0()
-            .backdrop_blur(px(16.))
+            .backdrop_blur(BLUR)
             .bg(rgba(0x10151b60))
             .border_b_1()
             .border_color(rgba(0xffffff20))
@@ -893,7 +893,7 @@ impl TerraMars {
                         div()
                             .flex()
                             .p_1()
-                            .rounded(px(14.))
+                            .rounded(px(10.))
                             .bg(rgba(0xffffff08))
                             .border_1()
                             .border_color(rgba(0xffffff1f))
@@ -954,7 +954,7 @@ impl TerraMars {
                 .relative()
                 .overflow_hidden()
                 .cursor_pointer()
-                .rounded(px(28.))
+                .rounded(px(10.))
                 .hover(|s| s.border_color(rgb(ORANGE)))
                 .on_click(cx.listener(move |this, _, _, cx| this.open_site(i, cx)))
                 .child(
@@ -962,7 +962,7 @@ impl TerraMars {
                         .absolute()
                         .size_full()
                         .object_fit(ObjectFit::Fill)
-                        .rounded(px(28.)),
+                        .rounded(px(10.)),
                 )
                 .child(
                     div()
@@ -973,14 +973,6 @@ impl TerraMars {
                         .justify_between()
                         .p_7()
                         .child(
-                            label(format!("0{}   /   MARS", i + 1))
-                                .text_color(rgb(INK))
-                                .bg(rgba(0x11151cae))
-                                .rounded_lg()
-                                .px_3()
-                                .py_2(),
-                        )
-                        .child(
                             div()
                                 .flex()
                                 .items_end()
@@ -988,10 +980,7 @@ impl TerraMars {
                                 .gap_4()
                                 .child(
                                     heading(*name, if width < 1000. { 34. } else { 42. })
-                                        .bg(rgba(0x11151cae))
-                                        .rounded_lg()
-                                        .px_3()
-                                        .py_2(),
+                                        .shadow_md(),
                                 )
                                 .child(
                                     div()
@@ -999,7 +988,7 @@ impl TerraMars {
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .rounded_full()
+                                        .rounded(px(10.))
                                         .border_1()
                                         .border_color(rgba(0xffffff66))
                                         .child("↗"),
@@ -1481,7 +1470,7 @@ impl TerraMars {
                                 .child(pane),
                         )
                     }),
-                ("planner-enter", self.transition as usize),
+                ("planner-enter", 0usize),
                 false,
             ))
             .into_any_element()
@@ -1621,7 +1610,7 @@ impl TerraMars {
                     .occlude()
                     .max_h(px((height - bottom - 80.).max(160.)))
                     .overflow_y_scroll()
-                    .rounded(px(20.))
+                    .rounded(px(10.))
                     .child(menu.flex_shrink_0()),
             )
             .into_any_element()
@@ -1728,7 +1717,7 @@ impl TerraMars {
             .gap_3();
         let grid = &self.images.hazards[self.site_index];
         if let Some((zone, slope)) = grid.danger(point) {
-            content=content.child(div().id("danger-explanation").p_3().rounded_lg().border_1().border_color(rgba(0xff694580)).bg(rgba(0x481c1c55)).flex().flex_col().gap_2()
+            content=content.child(div().id("danger-explanation").p_3().rounded(px(10.)).border_1().border_color(rgba(0xff694580)).bg(rgba(0x481c1c55)).flex().flex_col().gap_2()
                 .child(heading(format!("⚠ Steep terrain · {:.1}°",slope),20.).text_color(rgb(0xffaa83)))
                 .child(label(format!("Danger zone {} · maximum {:.1}°",zone.id+1,zone.max_slope)))
                 .child(label("Steep gradients can cause slipping or vehicle rollover. Routes exclude these cells using the app’s 15° slope planning limit."))
@@ -1806,7 +1795,7 @@ impl TerraMars {
         }
         content = content.child(
             div()
-                .rounded_lg()
+                .rounded(px(10.))
                 .p_3()
                 .bg(rgba(0xb3aaff0c))
                 .border_1()
@@ -1837,7 +1826,7 @@ impl TerraMars {
                     div()
                         .w(px(145.))
                         .p_3()
-                        .rounded_lg()
+                        .rounded(px(10.))
                         .bg(rgba(0xffffff06))
                         .child(label(short).text_size(px(14.)))
                         .child(
@@ -2155,11 +2144,43 @@ impl TerraMars {
             let record_for_open = record.clone();
             content = content.child(
                 glass()
+                    .id(("open-log-route", i))
                     .flex_shrink_0()
                     .p_5()
                     .flex()
                     .flex_col()
                     .gap_3()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let r = &record_for_open;
+                        let map = cx.new(|_| {
+                            let mut map = MapView::new(
+                                this.sites[index].clone(),
+                                index,
+                                this.images.clone(),
+                            );
+                            map.units = this.units();
+                            map.route = Arc::new(r.route.points.clone());
+                            map.start = r.route.points.first().copied();
+                            map.end = r.route.points.last().copied();
+                            map.fit_route(&r.route.points);
+                            map
+                        });
+                        cx.subscribe(
+                            &map,
+                            move |this, _, event: &MapSelection, cx| {
+                                this.log_danger = this.images.hazards[index]
+                                    .danger(event.point)
+                                    .map(|_| (index, event.point));
+                                cx.notify();
+                            },
+                        )
+                        .detach();
+                        this.log_danger = None;
+                        this.log_preview = Some(map);
+                        this.log_preview_index = Some(i);
+                        cx.notify();
+                    }))
                     .child(
                         div()
                             .flex()
@@ -2179,40 +2200,6 @@ impl TerraMars {
                                         format!("{} → {}", record.start_label, record.end_label),
                                         21.,
                                     )),
-                            )
-                            .child(
-                                button(("open-log-route", i), "View route ↗")
-                                    .flex_shrink_0()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        let r = &record_for_open;
-                                        let map = cx.new(|_| {
-                                            let mut map = MapView::new(
-                                                this.sites[index].clone(),
-                                                index,
-                                                this.images.clone(),
-                                            );
-                                            map.units = this.units();
-                                            map.route = Arc::new(r.route.points.clone());
-                                            map.start = r.route.points.first().copied();
-                                            map.end = r.route.points.last().copied();
-                                            map.fit_route(&r.route.points);
-                                            map
-                                        });
-                                        cx.subscribe(
-                                            &map,
-                                            move |this, _, event: &MapSelection, cx| {
-                                                this.log_danger = this.images.hazards[index]
-                                                    .danger(event.point)
-                                                    .map(|_| (index, event.point));
-                                                cx.notify();
-                                            },
-                                        )
-                                        .detach();
-                                        this.log_danger = None;
-                                        this.log_preview = Some(map);
-                                        this.log_preview_index = Some(i);
-                                        cx.notify();
-                                    })),
                             ),
                     )
                     .child(

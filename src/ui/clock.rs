@@ -58,7 +58,7 @@ impl Render for ClockView {
             .min_w(px(200.))
             .px_3()
             .py_1()
-            .rounded_lg()
+            .rounded(px(10.))
             .cursor_pointer()
             .hover(|s| s.bg(rgba(0xffffff0c)))
             .on_click(cx.listener(|this, _, _, cx| {

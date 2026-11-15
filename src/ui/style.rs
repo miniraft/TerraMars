@@ -6,15 +6,19 @@ pub const MUTED: u32 = 0xb2b6c1;
 pub const ORANGE: u32 = 0xff945e;
 pub const ACCENT: u32 = ORANGE;
 pub const TEAL: u32 = 0x8cddc9;
+/// One backdrop-blur radius, used by every surface so the blur stays
+/// consistent (and subtle) instead of patchy between panels, buttons
+/// and the header.
+pub const BLUR: Pixels = px(8.);
 /// GPU backdrop filtering samples the scene behind each surface rather than
 /// painting a decorative texture. Keep tints light enough to see orbital detail.
 /// Input belongs to the outer panel/scroll viewport, not its decorative material.
 pub fn glass() -> Div {
     div()
         .relative()
-        .rounded(px(22.))
+        .rounded(px(10.))
         .overflow_hidden()
-        .backdrop_blur(px(14.))
+        .backdrop_blur(BLUR)
         .bg(rgba(0x10151b65))
         .border_1()
         .border_color(rgba(0xffffff35))
@@ -39,10 +43,10 @@ pub fn button(id: impl Into<ElementId>, text: impl Into<SharedString>) -> Statef
         .px_4()
         .py_2()
         .min_h(px(44.))
-        .rounded(px(13.))
+        .rounded(px(10.))
         .border_1()
         .border_color(rgba(0xffffff22))
-        .backdrop_blur(px(10.))
+        .backdrop_blur(BLUR)
         .bg(rgba(0x10151b45))
         .font_family("Inter")
         .text_size(px(17.))
@@ -108,14 +112,15 @@ pub fn switch_visual(enabled: bool) -> Div {
     div()
         .w(px(40.))
         .h(px(24.))
-        .rounded_full()
+        .rounded(px(10.))
         .flex_shrink_0()
         .px(px(3.))
         .flex()
         .items_center()
         .when(enabled, |d| d.justify_end())
+        .rounded(px(10.))
         .bg(if enabled { rgb(ORANGE) } else { rgb(0x555d68) })
-        .child(div().size(px(18.)).rounded_full().bg(rgb(INK)))
+        .child(div().size(px(18.)).rounded(px(10.)).bg(rgb(INK)))
 }
 pub fn icon(name: &'static str) -> Svg {
     svg()
