@@ -1,0 +1,13 @@
+# Terrain danger zones and route screening
+
+TerraMars uses actual numerical **NASA MGS MOLA MEGDR topography at 128 pixels/degree**, separately from the colored relief image. The source is the [NASA PDS Geosciences MOLA archive](https://pds-geosciences.wustl.edu/missions/mgs/megdr.html), product `MGS-M-MOLA-5-MEGDR-L3-V1.0`. Measurements span September 1997–June 2001; the grids were created in March 2003. These are archived terrain products, not live hazard telemetry.
+
+`assets/data/terrain/` contains the exact regional big-endian signed 16-bit elevation crops, original PDS labels, grid bounds, byte-range requests and SHA-256 checksums. `tools/fetch_terrain.py` reproduces the extraction. Cell centers follow the PDS labels; the first sample is half a cell east/south of the crop's western/northern boundary. Elevations are metres relative to the Mars areoid. Nominal spacing is approximately 463 m north/south, with east/west spacing scaled by local latitude.
+
+The app calculates a centered finite-difference gradient using adjacent elevation samples and Mars spherical distances. Slope is `atan(hypot(dz/dx, dz/dy))`. It marks cells with slope **at least 15°** as terrain danger zones and groups adjacent cells for labels and explanations. **15° is an application planning policy, not a NASA traverse limit, astronaut limit, or certified hazard classification.** Selecting a red cell opens its calculated slope, reason for exclusion and provenance. Archived route previews have an independent danger inspector.
+
+Route planning runs on a background worker. A direct route is used only when every traversed raster cell passes the screen; otherwise A* finds a route through unblocked cells. Diagonals cannot cut blocked corners. A supercover grid traversal verifies and simplifies every segment. The start and destination must be in assessed, unblocked cells. Unknown cells and routes outside the crop are excluded. Recorded-rover alternatives also pass the same screen. Hiding the danger visual does not disable avoidance. No route is returned when a valid connection cannot be found.
+
+Distance and projected travel time use the route geometry and the user's explicit assumed speed. The planner shows duration and calculated arrival time in UTC or local mean Mars solar time. This is not a measured journey time; slope-dependent speed, vehicle dimensions, fatigue, stops and life-support limits are not modeled.
+
+MOLA cannot resolve individual rocks, wheel-scale ledges, sand traps, fine roughness, small cliffs, or current surface changes. The map does not mark uncolored cells as safe. An archived route created before terrain screening retains its original geometry rather than being silently rewritten.

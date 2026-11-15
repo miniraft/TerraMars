@@ -1,0 +1,5 @@
+{
+  "query": "https://www-mars.lmd.jussieu.fr/mcd_python/cgi-bin/mcdcgi.py?var1=pscaleheight&datekeyhtml=1&ls=all&localtime=all&latitude=18.41&longitude=77.69&altitude=1.5&zkey=3&dust=1&hrkey=1&averaging=off&isfixedlt=off&animation=off&dpi=80&islog=off&colorm=jet&iswind=off",
+  "asciiExport": "https://www-mars.lmd.jussieu.fr/mcd_python/txt/9013af11ea8c7fee0b8fc2fadc4e4676.txt",
+  "sha256": "fe1425476aafc56d9304810030fffab2bd8ee6f9f266dbe539ff803d43e2890e"
+}

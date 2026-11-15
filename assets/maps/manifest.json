@@ -1,0 +1,72 @@
+{
+  "jezero": {
+    "asset": "assets/maps/jezero_ctx.jpg",
+    "width": 3496,
+    "height": 3496,
+    "west": 76.94995880126953,
+    "east": 78.15021514892578,
+    "north": 19.100074768066406,
+    "south": 17.899818420410156,
+    "projection": "Equirectangular Mars 2000 sphere; planetocentric latitude; positive east longitude",
+    "source": "https://trek.nasa.gov/tiles/apidoc/trekAPI.html?body=mars",
+    "capabilities": "https://trek.nasa.gov/tiles/Mars/EQ/CTX_beta01_uncontrolled_5m_Caltech/1.0.0/WMTSCapabilities.xml",
+    "tile_template": "https://astro.arcgis.com/arcgis/rest/services/OnMars/CTX/MapServer/tile/{level}/{row}/{column}",
+    "tile_level": 10,
+    "tile_rows": [
+      403,
+      410
+    ],
+    "tile_columns": [
+      1461,
+      1468
+    ],
+    "degrees_per_pixel": 0.00034332275390625,
+    "credit": "NASA/JPL/MSSS/Caltech Murray Lab/Esri",
+    "product": "CTX Global BETA Uncontrolled 5m Caltech",
+    "sha256": "b7c61ddc74cfd73f1040f4f1f4e02578b36fdef0418ece230f4ae631cf11da92",
+    "retrieved_utc": "2026-11-14",
+    "notes": "Actual MRO Context Camera orbital imagery. Preliminary uncontrolled mosaic; no terrain elevation or safety certification. Pixel geometry is geographic, not Earth Web Mercator. JPEG rendering from source tiles; grayscale unchanged.",
+    "topographic_asset": "assets/maps/jezero_mola.jpg",
+    "topographic_source": "https://trek.nasa.gov/tiles/Mars/EQ/Mars_MGS_MOLA_ClrShade_merge_global_463m/1.0.0/WMTSCapabilities.xml",
+    "topographic_credit": "NASA/JPL/GSFC; Mars Global Surveyor MOLA color shaded relief",
+    "topographic_notes": "Real MOLA color shaded relief. Source product label nominal 463m; rendered geographic pixel spacing is about 325m north-south at selected tile level. Color is a visualization, not a numeric elevation grid. Fractional pixel resampling aligns these exact bounds with the CTX layer.",
+    "topographic_width": 219,
+    "topographic_height": 219,
+    "topographic_sha256": "977d6d72d44d5225df5d6220909ccb7623979e5ddc62bf6c5b0147e4f7e00d58"
+  },
+  "gale": {
+    "asset": "assets/maps/gale_ctx.jpg",
+    "width": 4370,
+    "height": 4370,
+    "west": 136.29981994628906,
+    "east": 139.3004608154297,
+    "north": -3.8994598388671875,
+    "south": -6.9001007080078125,
+    "projection": "Equirectangular Mars 2000 sphere; planetocentric latitude; positive east longitude",
+    "source": "https://trek.nasa.gov/tiles/apidoc/trekAPI.html?body=mars",
+    "capabilities": "https://trek.nasa.gov/tiles/Mars/EQ/CTX_beta01_uncontrolled_5m_Caltech/1.0.0/WMTSCapabilities.xml",
+    "tile_template": "https://astro.arcgis.com/arcgis/rest/services/OnMars/CTX/MapServer/tile/{level}/{row}/{column}",
+    "tile_level": 9,
+    "tile_rows": [
+      267,
+      275
+    ],
+    "tile_columns": [
+      899,
+      908
+    ],
+    "degrees_per_pixel": 0.0006866455078125,
+    "credit": "NASA/JPL/MSSS/Caltech Murray Lab/Esri",
+    "product": "CTX Global BETA Uncontrolled 5m Caltech",
+    "sha256": "79e76e257d3f93cc861f9220b6c1dbc1eaa288cfe648d1a9a1049975af66eb1a",
+    "retrieved_utc": "2026-11-14",
+    "notes": "Actual MRO Context Camera orbital imagery. Preliminary uncontrolled mosaic; no terrain elevation or safety certification. Pixel geometry is geographic, not Earth Web Mercator. JPEG rendering from source tiles; grayscale unchanged.",
+    "topographic_asset": "assets/maps/gale_mola.jpg",
+    "topographic_source": "https://trek.nasa.gov/tiles/Mars/EQ/Mars_MGS_MOLA_ClrShade_merge_global_463m/1.0.0/WMTSCapabilities.xml",
+    "topographic_credit": "NASA/JPL/GSFC; Mars Global Surveyor MOLA color shaded relief",
+    "topographic_notes": "Real MOLA color shaded relief. Source product label nominal 463m; rendered geographic pixel spacing is about 325m north-south at selected tile level. Color is a visualization, not a numeric elevation grid. Fractional pixel resampling aligns these exact bounds with the CTX layer.",
+    "topographic_width": 547,
+    "topographic_height": 547,
+    "topographic_sha256": "719096ed43194413d7f7c9818a7bfcd05c0096524026e6a865dd27e5c5412050"
+  }
+}

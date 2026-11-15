@@ -1,0 +1,399 @@
+--- a/gpui-ce/src/window.rs
++++ b/gpui-ce/src/window.rs
+@@ -6292,7 +6292,7 @@
+                 });
+             }
+             RasterizedGlyphFormat::BgraColor => {
+-                self.next_frame.scene.insert_primitive(PolychromeSprite {
++                self.next_frame.scene.insert_primitive(PolychromeSprite { rotation: 0.0, rotation_padding0: 0, rotation_padding1: 0, rotation_padding2: 0,
+                     order: 0,
+                     grayscale: false.into(),
+                     corner_smoothing: 0.0,
+@@ -6458,6 +6458,14 @@
+     /// paints the image in grayscale. Returns an error if the image can't be uploaded to the
+     /// renderer. Call it during paint.
+     pub fn paint_image(
++        &mut self, bounds: Bounds<Pixels>, image_bounds: Bounds<Pixels>,
++        corner_radii: Corners<Pixels>, corner_smoothing: f32,
++        data: Arc<RenderImage>, frame_index: usize, grayscale: bool,
++    ) -> Result<()> {
++        self.paint_image_rotated(bounds, image_bounds, corner_radii, corner_smoothing, data, frame_index, grayscale, 0.0)
++    }
++    /// Paint an atlas image rotated clockwise about its center. Map callers use zero corner radii.
++    pub fn paint_image_rotated(
+         &mut self,
+         bounds: Bounds<Pixels>,
+         image_bounds: Bounds<Pixels>,
+@@ -6466,6 +6474,7 @@
+         data: Arc<RenderImage>,
+         frame_index: usize,
+         grayscale: bool,
++        rotation: f32,
+     ) -> Result<()> {
+         self.invalidator.debug_assert_paint();
+ 
+@@ -6542,7 +6551,7 @@
+             .clamp_radii_for_quad_size(visible_bounds.size)
+             .scale(self.scale_factor());
+ 
+-        self.next_frame.scene.insert_primitive(PolychromeSprite {
++        self.next_frame.scene.insert_primitive(PolychromeSprite { rotation, rotation_padding0: 0, rotation_padding1: 0, rotation_padding2: 0,
+             order: 0,
+             grayscale: grayscale.into(),
+             corner_smoothing: corner_smoothing.clamp(0.0, 1.0),
+--- a/gpui-ce/src/scene.rs
++++ b/gpui-ce/src/scene.rs
+@@ -674,6 +674,13 @@
+             }
+             Primitive::SubpixelSprite(sprite) => {
+                 transformed_bounds(sprite.bounds, sprite.transformation)
++            }
++            Primitive::PolychromeSprite(sprite) if sprite.rotation != 0.0 => {
++                let center = sprite.bounds.center();
++                let (sn, cs) = sprite.rotation.sin_cos();
++                let w = sprite.bounds.size.width * cs.abs() + sprite.bounds.size.height * sn.abs();
++                let h = sprite.bounds.size.height * cs.abs() + sprite.bounds.size.width * sn.abs();
++                Bounds::new(point(center.x - w / 2., center.y - h / 2.), crate::size(w,h))
+             }
+             _ => *self.bounds(),
+         }
+@@ -1527,6 +1534,14 @@
+     pub corner_radii: Corners<ScaledPixels>,
+     /// The atlas tile that holds the pixels.
+     pub tile: AtlasTile,
++        /// Clockwise image rotation in radians, about the image center.
++        pub rotation: f32,
++        /// GPU layout padding.
++        pub rotation_padding0: u32,
++        /// GPU layout padding.
++        pub rotation_padding1: u32,
++        /// GPU layout padding.
++        pub rotation_padding2: u32,
+ }
+ 
+ impl From<PolychromeSprite> for Primitive {
+@@ -1800,7 +1815,7 @@
+     }
+ 
+     fn polychrome_sprite(texture_index: u32) -> PolychromeSprite {
+-        PolychromeSprite {
++        PolychromeSprite { rotation: 0.0, rotation_padding0: 0, rotation_padding1: 0, rotation_padding2: 0,
+             order: 0,
+             grayscale: ShaderBool::Disabled,
+             opacity: 1.0,
+--- a/gpui-ce/src/interactive.rs
++++ b/gpui-ce/src/interactive.rs
+@@ -681,6 +681,8 @@
+ /// Dereferences to [`Modifiers`].
+ #[derive(Clone, Debug, Default)]
+ pub struct PinchEvent {
++    /// Clockwise rotation delta, in radians, from native two-finger gestures.
++    pub rotation: f32,
+     /// The center of the pinch in window coordinates, in logical pixels.
+     pub position: Point<Pixels>,
+ 
+--- a/gpui_ce_render/src/shaders/sprites.rs
++++ b/gpui_ce_render/src/shaders/sprites.rs
+@@ -178,6 +178,10 @@
+         pub content_mask: ContentMask,
+         pub corner_radii: Corners,
+         pub tile: AtlasTile,
++        pub rotation: f32,
++        pub rotation_padding0: u32,
++        pub rotation_padding1: u32,
++        pub rotation_padding2: u32,
+     }
+     storage!(group(1), binding(0), POLYCHROME_SPRITES: RuntimeArray<PolychromeSprite>);
+     texture!(group(1), binding(1), POLYCHROME_TEXTURE: Texture2D<f32>);
+@@ -197,15 +201,20 @@
+         sprite: PolychromeSprite,
+     ) -> PolychromeVertexData {
+         let vertex = rectangle_vertex(vertex_id, sprite.bounds);
++        let center = sprite.bounds.origin + sprite.bounds.size * 0.5;
++        let offset = vertex.viewport_position - center;
++        let sn = sin(sprite.rotation);
++        let cs = cos(sprite.rotation);
++        let rotated = center + vec2f(cs * offset.x - sn * offset.y, sn * offset.x + cs * offset.y);
+         PolychromeVertexData {
+-            position: vertex.clip_position,
++            position: viewport_to_clip_position(rotated),
+             tile_position: atlas_texture_coordinates(
+                 vertex.unit_position,
+                 sprite.tile,
+                 texture_dimensions(POLYCHROME_TEXTURE),
+             ),
+             sprite_id: instance_id,
+-            clip_distances: clip_distances(vertex.viewport_position, sprite.content_mask.bounds),
++            clip_distances: clip_distances(rotated, sprite.content_mask.bounds),
+         }
+     }
+ 
+@@ -255,6 +264,9 @@
+         }
+         let sprite = get!(POLYCHROME_SPRITES)[input.sprite_id as usize];
+         let color = polychrome_color(sprite, input.tile_position);
++        if abs(sprite.rotation) > 0.00001 {
++            return blend_color(color, sprite.opacity * ContentMask::alpha(sprite.content_mask, input.position.xy()));
++        }
+         blend_color(
+             color,
+             sprite.opacity
+--- a/gpui_ce_linux/src/linux/x11/client.rs
++++ b/gpui_ce_linux/src/linux/x11/client.rs
+@@ -1456,7 +1456,7 @@
+                     px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
+                 );
+                 drop(state);
+-                window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
++                window.handle_input(PlatformInput::Pinch(gpui::PinchEvent { rotation: 0.0,
+                     position,
+                     delta: 0.0,
+                     modifiers,
+@@ -1475,10 +1475,10 @@
+                 // scale is in FP16.16 format: divide by 65536 to get the float value
+                 let new_absolute_scale = event.scale as f32 / 65536.0;
+                 let previous_scale = state.pinch_scale;
+-                let zoom_delta = new_absolute_scale - previous_scale;
++                let zoom_delta = new_absolute_scale / previous_scale - 1.0;
+                 state.pinch_scale = new_absolute_scale;
+                 drop(state);
+-                window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
++                window.handle_input(PlatformInput::Pinch(gpui::PinchEvent { rotation: (event.delta_angle as f32 / 65536.0).to_radians(),
+                     position,
+                     delta: zoom_delta,
+                     modifiers,
+@@ -1496,7 +1496,7 @@
+                     px(event.event_y as f32 / u16::MAX as f32 / state.scale_factor),
+                 );
+                 drop(state);
+-                window.handle_input(PlatformInput::Pinch(gpui::PinchEvent {
++                window.handle_input(PlatformInput::Pinch(gpui::PinchEvent { rotation: 0.0,
+                     position,
+                     delta: 0.0,
+                     modifiers,
+--- a/gpui_ce_linux/src/linux/wayland/client.rs
++++ b/gpui_ce_linux/src/linux/wayland/client.rs
+@@ -2873,7 +2873,7 @@
+                     state = client.borrow_mut();
+                 }
+                 state.pinch_scale = 1.0;
+-                let input = PlatformInput::Pinch(PinchEvent {
++                let input = PlatformInput::Pinch(PinchEvent { rotation: 0.0,
+                     position: state.mouse_location.unwrap_or(point(px(0.0), px(0.0))),
+                     delta: 0.0,
+                     modifiers: state.modifiers,
+@@ -2882,13 +2882,13 @@
+                 drop(state);
+                 window.handle_input(input);
+             }
+-            zwp_pointer_gesture_pinch_v1::Event::Update { time: _, scale, .. } => {
++            zwp_pointer_gesture_pinch_v1::Event::Update { time: _, scale, rotation, .. } => {
+                 let new_absolute_scale = scale as f32;
+                 let previous_scale = state.pinch_scale;
+-                let zoom_delta = new_absolute_scale - previous_scale;
++                let zoom_delta = new_absolute_scale / previous_scale - 1.0;
+                 state.pinch_scale = new_absolute_scale;
+ 
+-                let input = PlatformInput::Pinch(PinchEvent {
++                let input = PlatformInput::Pinch(PinchEvent { rotation: (rotation as f32).to_radians(),
+                     position: state.mouse_location.unwrap_or(point(px(0.0), px(0.0))),
+                     delta: zoom_delta,
+                     modifiers: state.modifiers,
+@@ -2903,7 +2903,7 @@
+                 cancelled: _,
+             } => {
+                 state.pinch_scale = 1.0;
+-                let input = PlatformInput::Pinch(PinchEvent {
++                let input = PlatformInput::Pinch(PinchEvent { rotation: 0.0,
+                     position: state.mouse_location.unwrap_or(point(px(0.0), px(0.0))),
+                     delta: 0.0,
+                     modifiers: state.modifiers,
+--- a/gpui_ce_macos/src/window.rs
++++ b/gpui_ce_macos/src/window.rs
+@@ -389,6 +389,10 @@
+             );
+             decl.add_method(
+                 sel!(magnifyWithEvent:),
++                handle_view_event as unsafe extern "C" fn(_, _, _),
++            );
++            decl.add_method(
++                sel!(rotateWithEvent:),
+                 handle_view_event as unsafe extern "C" fn(_, _, _),
+             );
+             decl.add_method(
+--- a/gpui_ce_macos/src/events.rs
++++ b/gpui_ce_macos/src/events.rs
+@@ -231,6 +231,14 @@
+                     _ => None,
+                 }
+             }
++            NSEventType::Rotate => window_height.map(|window_height| {
++                PlatformInput::Pinch(PinchEvent {
++                    rotation: -(native_event.rotation() as f32).to_radians(),
++                    position: point(px(native_event.locationInWindow().x as f32), window_height - px(native_event.locationInWindow().y as f32)),
++                    delta: 0.0, modifiers: read_modifiers(native_event),
++                    phase: match native_event.phase() { NSEventPhase::Began => TouchPhase::Started, NSEventPhase::Ended => TouchPhase::Ended, _ => TouchPhase::Moved },
++                })
++            }),
+             NSEventType::Magnify => window_height.map(|window_height| {
+                 let phase = match native_event.phase() {
+                     NSEventPhase::MayBegin | NSEventPhase::Began => TouchPhase::Started,
+@@ -240,7 +248,7 @@
+ 
+                 let magnification = native_event.magnification() as f32;
+ 
+-                PlatformInput::Pinch(PinchEvent {
++                PlatformInput::Pinch(PinchEvent { rotation: 0.0,
+                     position: point(
+                         px(native_event.locationInWindow().x as f32),
+                         window_height - px(native_event.locationInWindow().y as f32),
+--- a/gpui_ce_windows/Cargo.toml
++++ b/gpui_ce_windows/Cargo.toml
+@@ -132,6 +132,7 @@
+ [target.'cfg(target_os = "windows")'.dependencies.windows]
+ version = "0.62.2"
+ features = [
++    "Win32_UI_Input_Touch",
+     "Foundation_Numerics",
+     "Globalization_DateTimeFormatting",
+     "Storage_Search",
+--- a/gpui_ce_windows/src/direct_manipulation.rs
++++ b/gpui_ce_windows/src/direct_manipulation.rs
+@@ -180,7 +180,7 @@
+             GestureKind::Pinch => {
+                 self.pending_events
+                     .borrow_mut()
+-                    .push(PlatformInput::Pinch(PinchEvent {
++                    .push(PlatformInput::Pinch(PinchEvent { rotation: 0.0,
+                         position,
+                         delta: 0.0,
+                         modifiers,
+@@ -304,7 +304,7 @@
+                 self.gesture_kind.set(GestureKind::Pinch);
+                 self.pending_events
+                     .borrow_mut()
+-                    .push(PlatformInput::Pinch(PinchEvent {
++                    .push(PlatformInput::Pinch(PinchEvent { rotation: 0.0,
+                         position,
+                         delta: 0.0,
+                         modifiers,
+@@ -335,7 +335,7 @@
+                 let scale_delta = scale / last_scale;
+                 self.pending_events
+                     .borrow_mut()
+-                    .push(PlatformInput::Pinch(PinchEvent {
++                    .push(PlatformInput::Pinch(PinchEvent { rotation: 0.0,
+                         position,
+                         delta: scale_delta - 1.0,
+                         modifiers,
+--- a/gpui_ce_windows/src/window.rs
++++ b/gpui_ce_windows/src/window.rs
+@@ -56,6 +56,7 @@
+     pub frame_signal: Arc<PlatformFrameSignal>,
+     pub input_handler: Cell<Option<PlatformInputHandler>>,
+     pub ime_enabled: Cell<bool>,
++    pub gesture_rotation: Cell<f32>,
+     pub pending_surrogate: Cell<Option<u16>>,
+     pub last_reported_modifiers: Cell<Option<Modifiers>>,
+     pub last_reported_capslock: Cell<Option<Capslock>>,
+@@ -170,6 +171,7 @@
+             frame_signal: Arc::new(PlatformFrameSignal::new()),
+             input_handler: Cell::new(input_handler),
+             ime_enabled: Cell::new(true),
++            gesture_rotation: Cell::new(0.0),
+             pending_surrogate: Cell::new(pending_surrogate),
+             last_reported_modifiers: Cell::new(last_reported_modifiers),
+             last_reported_capslock: Cell::new(last_reported_capslock),
+--- a/gpui_ce_windows/src/directx_renderer.rs
++++ b/gpui_ce_windows/src/directx_renderer.rs
+@@ -3032,7 +3032,7 @@
+             tile: mono,
+             transformation: Default::default(),
+         });
+-        scene.insert_primitive(PolychromeSprite {
++        scene.insert_primitive(PolychromeSprite { rotation: 0.0, rotation_padding0: 0, rotation_padding1: 0, rotation_padding2: 0,
+             order: 0,
+             grayscale: ShaderBool::Disabled,
+             opacity: 1.0,
+--- a/gpui_ce_windows/src/events.rs
++++ b/gpui_ce_windows/src/events.rs
+@@ -10,7 +10,7 @@
+         UI::{
+             Controls::*,
+             HiDpi::*,
+-            Input::{Ime::*, KeyboardAndMouse::*},
++            Input::{Ime::*, KeyboardAndMouse::*, Touch::*},
+             WindowsAndMessaging::*,
+         },
+     },
+@@ -144,6 +144,7 @@
+             WM_XBUTTONUP => {
+                 self.handle_xbutton_msg(handle, wparam, lparam, Self::handle_mouse_up_msg)
+             }
++            WM_GESTURE => self.handle_rotation_gesture(handle, lparam),
+             WM_MOUSEWHEEL => self.handle_mouse_wheel_msg(handle, wparam, lparam),
+             WM_MOUSEHWHEEL => self.handle_mouse_horizontal_wheel_msg(handle, wparam, lparam),
+             WM_SYSKEYUP => self.handle_syskeyup_msg(wparam, lparam),
+@@ -545,6 +546,28 @@
+         handler(self, handle, MouseButton::Navigate(nav_dir), lparam)
+     }
+ 
++    fn handle_rotation_gesture(&self, handle: HWND, lparam: LPARAM) -> Option<isize> {
++        let gesture = HGESTUREINFO(lparam.0 as *mut _);
++        let mut info = GESTUREINFO { cbSize: std::mem::size_of::<GESTUREINFO>() as u32, ..Default::default() };
++        if unsafe { GetGestureInfo(gesture, &mut info) }.is_err() || info.dwID != GID_ROTATE.0 { return None; }
++        let angle = ((info.ullArguments & 0xffff) as f32 / 65535.0 * 4.0 - 2.0) * std::f32::consts::PI;
++        let previous = self.state.gesture_rotation.replace(angle);
++        let begin = info.dwFlags & GF_BEGIN != 0;
++        let delta = if begin { 0.0 } else { (angle-previous+std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)-std::f32::consts::PI };
++        let mut location = POINT { x: info.ptsLocation.x as i32, y: info.ptsLocation.y as i32 };
++        let _ = unsafe { ScreenToClient(handle, &mut location) };
++        if let Some(mut callback) = self.state.callbacks.input.take() {
++            callback(PlatformInput::Pinch(PinchEvent {
++                position: logical_point(location.x as f32, location.y as f32, self.state.scale_factor.get()),
++                delta: 0.0, rotation: -delta, modifiers: current_modifiers(),
++                phase: if begin { TouchPhase::Started } else if info.dwFlags & GF_END != 0 { TouchPhase::Ended } else { TouchPhase::Moved },
++            }));
++            self.state.callbacks.input.set(Some(callback));
++        }
++        let _ = unsafe { CloseGestureInfoHandle(gesture) };
++        Some(0)
++    }
++
+     fn handle_mouse_wheel_msg(
+         &self,
+         handle: HWND,
+@@ -856,6 +879,11 @@
+     }
+ 
+     fn handle_create_msg(&self, handle: HWND) -> Option<isize> {
++        // Rotation is opt-in in the Windows gesture API. Unsupported drivers
++        // retain compass and Alt+scroll controls at the application boundary.
++        let config = GESTURECONFIG { dwID: GID_ROTATE, dwWant: 1, dwBlock: 0 };
++        let _ = unsafe { SetGestureConfig(handle, 0, &[config], std::mem::size_of::<GESTURECONFIG>() as u32) };
++
+         if self.hide_title_bar {
+             notify_frame_changed(handle);
+             Some(0)
+--- a/gpui_ce_wgpu/src/wgpu_renderer/headless.rs
++++ b/gpui_ce_wgpu/src/wgpu_renderer/headless.rs
+@@ -286,7 +286,7 @@
+             },
+         };
+         let mut scene = Scene::default();
+-        scene.insert_primitive(PolychromeSprite {
++        scene.insert_primitive(PolychromeSprite { rotation: 0.0, rotation_padding0: 0, rotation_padding1: 0, rotation_padding2: 0,
+             order: 0,
+             grayscale: ShaderBool::default(),
+             opacity: 1.0,
+--- a/gpui_ce_apple/src/metal_renderer.rs
++++ b/gpui_ce_apple/src/metal_renderer.rs
+@@ -2994,7 +2994,7 @@
+             },
+         };
+         let mut sprite = Scene::default();
+-        sprite.insert_primitive(PolychromeSprite {
++        sprite.insert_primitive(PolychromeSprite { rotation: 0.0, rotation_padding0: 0, rotation_padding1: 0, rotation_padding2: 0,
+             order: 0,
+             grayscale: gpui::ShaderBool::Disabled,
+             opacity: 0.75,

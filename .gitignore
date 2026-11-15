@@ -1,0 +1,15 @@
+.idea/
+.DS_Store
+Thumbs.db
+
+# Application builds, regression artifacts and project-local toolchains.
+/build/
+/coverage/
+/target/
+/dist/
+/.tools/
+# Cargo.lock is intentionally tracked for reproducible desktop builds.
+
+.venv/
+**/__pycache__/
+voice-model/

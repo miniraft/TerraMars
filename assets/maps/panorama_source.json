@@ -1,0 +1,26 @@
+{
+  "title": "Curiosity's 1.8-Billion-Pixel Panorama \u2014 terrain crop",
+  "source": "https://science.nasa.gov/photojournal/curiositys-18-billion-pixel-panorama/",
+  "download": "https://assets.science.nasa.gov/dynamicimage/assets/science/psd/photojournal/pia/pia23/pia23623/PIA23623.jpg?w=3000",
+  "credit": "NASA/JPL-Caltech/MSSS",
+  "observed": "2019-11-24 through 2019-12-01",
+  "published": "2020-03-04",
+  "blur_radius_pixels": 3.0,
+  "notes": "Real NASA terrain crop. Decorative warm red grade, overlapping periodic crossfade and offline Gaussian blur. No runtime panorama blur; scientific maps remain unchanged.",
+  "source_asset": {
+    "asset": "assets/maps/mars_panorama.jpg",
+    "asset_size": [
+      1650,
+      315
+    ],
+    "sha256": "35b94fc437dac93f12f91e58782d133fb0a7a6155ff5d7e13d27ce1084ec24ad"
+  },
+  "decorative_blurred_asset": {
+    "asset": "assets/maps/mars_panorama_blurred.png",
+    "asset_size": [
+      1660,
+      342
+    ],
+    "sha256": "2d682f2d03ef1cd1fc6e78d7d0b6d0d132e27e0e17986a54805b2b03a1ce30ad"
+  }
+}

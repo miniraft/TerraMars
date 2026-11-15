@@ -1,0 +1,42 @@
+{
+  "jezero_current": {
+    "url": "https://mars.nasa.gov/mmgis-maps/M20/Layers/json/M20_waypoints_current.json",
+    "retrievedUtc": "2026-11-14",
+    "sha256": "59b68e9c289c1dbc4fbe3fdc627a8d9a09f42e97a081ca585acc11f21431ea93"
+  },
+  "gale_current": {
+    "url": "https://mars.nasa.gov/mmgis-maps/MSL/Layers/json/MSL_waypoints_current.json",
+    "retrievedUtc": "2026-11-14",
+    "sha256": "2df9d14258bf9622494a8b6e1c0f7846ac0cafa7907155054e0af618063a0832"
+  },
+  "jezero_traverse": {
+    "url": "https://mars.nasa.gov/mmgis-maps/M20/Layers/json/M20_traverse.json",
+    "retrievedUtc": "2026-11-14",
+    "sha256": "6ddd0ece913d75b45d105946082f95ed84e68f4718b68d32a4421dc30877e7e6"
+  },
+  "gale_traverse": {
+    "url": "https://mars.nasa.gov/mmgis-maps/MSL/Layers/json/MSL_traverse.json",
+    "retrievedUtc": "2026-11-14",
+    "sha256": "c22752254772c8edaee295986cf6a188daf088957f29d042cd62862365cdf3f5"
+  },
+  "jezero_weather": {
+    "url": "https://mars.nasa.gov/rss/api/?feed=weather&category=mars2020&feedtype=json",
+    "retrievedUtc": "2026-11-14",
+    "sha256": "9ff9db7675b5165e6d0547f9b86b75cea2cd1badfd27ea5aec4fe6956a47ac35"
+  },
+  "gale_weather": {
+    "url": "https://mars.nasa.gov/rss/api/?feed=weather&category=msl&feedtype=json",
+    "retrievedUtc": "2026-11-14",
+    "sha256": "1c3f64aa69ab00e8b90905734fb9b2d0838979b74f97446075d74b77d0fc4749"
+  },
+  "jezero_waypoints": {
+    "url": "https://mars.nasa.gov/mmgis-maps/M20/Layers/json/M20_waypoints.json",
+    "retrievedUtc": "2026-11-14",
+    "sha256": "bd143ee69241229926abd373e6305b8bbb326d6b5a7b4a8d6935262696f93dc4"
+  },
+  "gale_waypoints": {
+    "url": "https://mars.nasa.gov/mmgis-maps/MSL/Layers/json/MSL_waypoints.json",
+    "retrievedUtc": "2026-11-14",
+    "sha256": "5a32324f4b8ba22ebdfac50a503e195f47ccdc876ad4c15b19e29dc7cef15a09"
+  }
+}

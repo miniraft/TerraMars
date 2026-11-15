@@ -1,0 +1,5 @@
+{
+  "query": "https://www-mars.lmd.jussieu.fr/mcd_python/cgi-bin/mcdcgi.py?var1=thermal_inertia&datekeyhtml=1&ls=all&localtime=all&latitude=18.41&longitude=77.69&altitude=1.5&zkey=3&dust=1&hrkey=1&averaging=off&isfixedlt=off&animation=off&dpi=80&islog=off&colorm=jet&iswind=off",
+  "asciiExport": "https://www-mars.lmd.jussieu.fr/mcd_python/txt/e479be6067c8d12b5a7f80063e68929f.txt",
+  "sha256": "1629272e33e13a92fdffde7e6566948489153ff5ccbe257d7726e1fe5725afd5"
+}

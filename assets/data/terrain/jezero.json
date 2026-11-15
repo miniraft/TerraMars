@@ -1,0 +1,21 @@
+{
+  "site": "jezero",
+  "product": "MGS MOLA MEGDR 128 pixels per degree topography",
+  "source_url": "https://pds-geosciences.wustl.edu/missions/mgs/megdr.html",
+  "download_url": "https://pds-geosciences.wustl.edu/mgs/mgs-m-mola-5-megdr-l3-v1/mgsl_300x/meg128/megt44n000hb.img",
+  "label_url": "https://pds-geosciences.wustl.edu/mgs/mgs-m-mola-5-megdr-l3-v1/mgsl_300x/meg128/megt44n000hb.lbl",
+  "source_range": "bytes=73382400-77022719",
+  "range_sha256": "f0bcc6fc4662e81ab7ba42518d99a3032ab0257e618920131a2bb10ad123908d",
+  "sha256": "196753aea370ee9698176f5e93fd1829976a6cabf7fbae9519140e36c54262ed",
+  "format": "big-endian signed 16-bit topography, metres relative to Mars areoid",
+  "columns": 159,
+  "rows": 158,
+  "west": 76.9296875,
+  "north": 19.1171875,
+  "degrees_per_cell": 0.0078125,
+  "nominal_resolution_m": 463,
+  "observed": "1997-09-15 through 2001-06-30",
+  "product_created": "2003-03-21",
+  "slope_limit_degrees": 15,
+  "policy_note": "Application planning exclusion threshold, not a NASA traverse limit or hazard certification."
+}

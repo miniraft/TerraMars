@@ -1,0 +1,103 @@
+name: Desktop builds
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  build:
+    name: Rust / ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-24.04
+          - platform: macos
+            runner: macos-15
+          - platform: windows
+            runner: windows-2022
+
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake pkg-config \
+            libfontconfig1-dev libfreetype6-dev libwayland-dev \
+            libx11-xcb-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev \
+            libssl-dev libasound2-dev libzstd-dev
+
+      - name: Verify macOS Metal tools
+        if: runner.os == 'macOS'
+        run: |
+          xcodebuild -version
+          xcrun --find metal
+          xcrun --find metallib
+
+      # rustup honors the exact version and components in rust-toolchain.toml.
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          rustup show
+          rustc --version
+          cargo --version
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}-
+
+      - name: Check formatting
+        # Keep the vendored upstream compatibility patch independent of style changes.
+        run: cargo fmt --package terramars -- --check
+
+      - name: Check Rust code
+        run: cargo clippy --locked --release --all-targets -- -D warnings
+
+      - name: Test calculations and application state
+        run: cargo test --locked --release --all-targets
+
+      - name: Build Rust desktop application
+        run: cargo build --locked --release --bin terramars
+
+      - name: Package native application
+        shell: bash
+        run: python3 tools/package_desktop.py --platform ${{ matrix.platform }}
+
+      - name: Upload native application
+        uses: actions/upload-artifact@v7
+        with:
+          name: TerraMars-${{ matrix.platform }}-${{ runner.arch }}
+          path: dist/TerraMars-*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
