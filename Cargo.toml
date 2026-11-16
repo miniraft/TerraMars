@@ -40,6 +40,10 @@ strip = "debuginfo"
 debug = 0
 
 [patch.crates-io]
+# block 0.1.6 declares an extern static of an uninhabited type, which the
+# `uninhabited_static` future-incompat lint will reject. The vendored copy
+# changes only that type to an opaque struct. See vendor/GPUI_PATCHES.md.
+block = { path = "vendor/block" }
 gpui-ce = { path = "vendor/gpui-ce" }
 gpui_ce_render = { path = "vendor/gpui_ce_render" }
 gpui_ce_linux = { path = "vendor/gpui_ce_linux" }

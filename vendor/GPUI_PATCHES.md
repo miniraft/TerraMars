@@ -9,3 +9,12 @@ The seven `gpui*` directories retain the published Apache-2.0 GPUI CE **0.3.0** 
 Windows Precision Touchpad drivers do not universally expose a twist gesture through the OS. The compass cycles N/E/S/W on every desktop; Alt+scroll also rotates. Native gesture input is used when the OS reports it. Physical device support must be verified on the target hardware.
 
 Upstream sources: [GPUI CE](https://github.com/gpui-ce/gpui-ce), [Wayland pointer gestures](https://wayland.app/protocols/pointer-gestures-unstable-v1), [Microsoft WM_GESTURE](https://learn.microsoft.com/en-us/windows/win32/wintouch/wm-gesture), [gesture configuration](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-gestureconfig). The native smoke driver also dispatches pinch/rotation through the live GPUI window event path; it is not a claim of physical trackpad validation.
+
+## Vendored `block` crate (macOS)
+
+`vendor/block` is the published MIT-licensed `block` **0.1.6** source, selected through the same `Cargo.toml` patch table. It is reached transitively from `cocoa` 0.26 and `metal` 0.33 on macOS. Upstream is unmaintained (0.1.6 is the last release), so two no-behaviour-change edits are carried here:
+
+- `_NSConcreteStackBlock` was declared as an extern static of the uninhabited `enum Class { }`. Rust's `uninhabited_static` future-incompat lint ([rust-lang/rust#74840](https://github.com/rust-lang/rust/issues/74840)) will make that a hard error, so `Class` is now an opaque `#[repr(C)]` struct. The type is only used behind `*const Class` / `&Class`, so the ABI and the symbol address are unchanged.
+- `extern fn` declarations gained their explicit `"C"` ABI, which is the same ABI and removes 46 deprecation warnings from macOS builds.
+
+Both changes are confirmed warning-free by `cargo check --target {aarch64,x86_64}-apple-darwin` on Rust 1.100.0.
