@@ -40,4 +40,4 @@ Assets and license notices are embedded. Run the executable with `--export-licen
 
 ## Voice control
 
-Voice commands are **not implemented yet**. The microphone button in the header is a placeholder: selecting it shows a "Voice functionality coming soon" notice. No microphone access is requested and no audio is captured.
+Voice commands are **not implemented yet**. No microphone access is requested and no audio is captured.
