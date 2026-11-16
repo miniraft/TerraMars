@@ -4,8 +4,13 @@ use std::sync::Arc;
 /// Decoded once, uploaded once by GPUI's image atlas, then reused for every pan.
 pub struct Images {
     pub imagery: [Arc<RenderImage>; 2],
+    /// Card-sized crops. The Gale preview is a single zoomed frame so the home
+    /// card doesn't show the mosaic's stitched seams.
+    pub cards: [Arc<RenderImage>; 2],
     pub terrain: [Arc<RenderImage>; 2],
     pub panorama: Arc<RenderImage>,
+    /// Public-domain NASA Viking mosaic used by the Home "Coming Soon" card.
+    pub coming_soon: Arc<RenderImage>,
     pub hazards: [Arc<terramars::domain::terrain::TerrainGrid>; 2],
 }
 
@@ -32,9 +37,12 @@ impl Images {
                 decode(include_bytes!("../../assets/maps/jezero_mola.jpg"))?,
                 decode(include_bytes!("../../assets/maps/gale_mola.jpg"))?,
             ],
-            panorama: decode(include_bytes!(
-                "../../assets/maps/mars_panorama_blurred.png"
-            ))?,
+            panorama: decode(include_bytes!("../../assets/maps/mars_panorama_loop.jpg"))?,
+            cards: [
+                decode(include_bytes!("../../assets/maps/jezero_ctx.jpg"))?,
+                decode(include_bytes!("../../assets/maps/gale_card.jpg"))?,
+            ],
+            coming_soon: decode(include_bytes!("../../assets/maps/coming_soon_mars.jpg"))?,
         })
     }
 }
@@ -52,13 +60,27 @@ impl gpui::AssetSource for EmbeddedAssets {
             "icons/refresh.svg" => Some(include_bytes!("../../assets/icons/refresh.svg")),
             "icons/chevron.svg" => Some(include_bytes!("../../assets/icons/chevron.svg")),
             "icons/route.svg" => Some(include_bytes!("../../assets/icons/route.svg")),
+            "icons/metric.svg" => Some(include_bytes!("../../assets/icons/metric.svg")),
+            "icons/scientific.svg" => Some(include_bytes!("../../assets/icons/scientific.svg")),
+            "icons/mic.svg" => Some(include_bytes!("../../assets/icons/mic.svg")),
             _ => None,
         };
         Ok(bytes.map(std::borrow::Cow::Borrowed))
     }
     fn list(&self, path: &str) -> anyhow::Result<Vec<gpui::SharedString>> {
         Ok([
-            "back", "info", "rover", "fit", "layers", "pin", "refresh", "chevron", "route",
+            "back",
+            "info",
+            "rover",
+            "fit",
+            "layers",
+            "pin",
+            "refresh",
+            "chevron",
+            "route",
+            "metric",
+            "scientific",
+            "mic",
         ]
         .into_iter()
         .map(|name| format!("icons/{name}.svg"))
@@ -78,7 +100,17 @@ mod tests {
         // path lookup. Test the real registry boundary to prevent blank icons.
         let registry = gpui::AssetRegistry::from(EmbeddedAssets);
         for name in [
-            "back", "info", "rover", "fit", "layers", "pin", "refresh", "chevron", "route",
+            "back",
+            "info",
+            "rover",
+            "fit",
+            "layers",
+            "pin",
+            "refresh",
+            "chevron",
+            "route",
+            "metric",
+            "scientific",
         ] {
             let path = format!("icons/{name}.svg");
             let bytes = registry

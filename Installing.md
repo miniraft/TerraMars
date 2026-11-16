@@ -1,6 +1,6 @@
 # TerraMars
 
-A native **Rust + GPUI Community Edition** desktop explorer for **Jezero Crater** and **Gale Crater** on Mars. The shared application targets **Linux, macOS and Windows**, using real NASA imagery, rover tracks, sourced observations and Mars-coordinate route planning. It keeps the dark liquid-glass appearance, bundled **Inter** body text, **Manrope** headings, large crater cards and gently moving NASA panorama.
+A native **Rust + GPUI Community Edition** desktop explorer for **Jezero Crater** and **Gale Crater** on Mars. The shared application targets **Linux, macOS and Windows**, using real NASA imagery, rover tracks, sourced observations and Mars-coordinate route planning. It keeps the dark liquid-glass appearance, bundled **Departure Mono** body text, **Orbitron** headings, large crater cards and gently moving NASA panorama.
 
 ## Run the Rust app
 
@@ -68,11 +68,11 @@ Source URLs, imagery bounds, credits, checksums and instrument limitations are i
 
 ## UI controls and climate predictions
 
-Motion stays on; the motion option and microphone button were removed. Home / Mission log are text navigation with orange active state. Metric / Scientific use a two-part control, and Visuals cards have switches at the right. The clock's arrow indicates that it switches Mars / Earth time. Map controls provide zoom and fit. A glass compass cycles N/E/S/W; two-finger rotation uses native OS gesture events where available, with Alt+scroll as a fallback.
+Motion stays on; the motion option was removed, and the microphone button is a placeholder that reports voice control as coming soon. Home / Mission log are text navigation with orange active state. Metric / Scientific use a two-part control, and Visuals cards have switches at the right. The clock's arrow indicates that it switches Mars / Earth time. Map controls provide zoom and fit. A glass compass cycles N/E/S/W; two-finger rotation uses native OS gesture events where available, with Alt+scroll as a fallback.
 
 The regional **Predicted** values use real, credited [Mars Climate Database 6.2](https://www-mars.lmd.jussieu.fr/mcd_python/) model exports, interpolated by Mars solar longitude and local true solar time. The model is regional climatology, not live weather, a storm warning, or a validated mission forecast. Measurements keep their original dates and provenance. See [CLIMATE_MODEL.md](docs/CLIMATE_MODEL.md).
 
-The red home backdrop is a warm decorative crop of NASA’s Curiosity panorama PIA23623. Its edges are blended periodically and the image is lightly blurred offline using `tools/prepare_panorama.py` (3-pixel radius, reduced from 10). The same sharper image is used in Mission log. Buttons, panels and the overlay header use GPUI CE’s genuine GPU backdrop blur with light translucent tints. No refraction is applied. Inter and Manrope use bundled static font faces for consistent weights.
+The red home backdrop is a warm decorative crop of NASA’s Curiosity panorama PIA23623. Its edges are blended periodically and the image is lightly blurred offline using `tools/prepare_panorama.py` (3-pixel radius, reduced from 10). The same sharper image is used in Mission log. Buttons, panels and the overlay header use GPUI CE’s genuine GPU backdrop blur with light translucent tints. No refraction is applied. Departure Mono and Orbitron use bundled static font faces for consistent weights.
 
 Button content uses one measured line with an explicit line height. Icon-only buttons omit empty text elements; long labels scroll within their available width. Home returns to the preserved explorer after visiting Mission log. The crater bubble’s back arrow returns to region selection. Info toggles the information/layers panel; saved routes open in a closable preview inside Mission log without changing the explorer.
 
@@ -98,13 +98,15 @@ cargo build --locked --release --bin terramars
 python3 tools/package_desktop.py --platform linux
 ```
 
-Use `--platform macos` or `--platform windows` when packaging a binary built on that host. The packager requires Python 3.10 or later and uses only the standard library. Images, fonts and the initial catalog are embedded in the executable; package archives also include source documentation, provenance snapshots, font licenses and the optional voice bridge.
+Use `--platform macos` or `--platform windows` when packaging a binary built on that host. The packager requires Python 3.10 or later and uses only the standard library. Images, fonts and the initial catalog are embedded in the executable; package archives also include source documentation, provenance snapshots and font licenses. Pass `--arch`, `--version` and, for release builds, `--sign-identity` to stamp cross-compiled artifacts and Developer ID sign the macOS bundle.
 
-App icons come from `assets/icons/app_logo`: Windows and Linux use `logo_small.png`; macOS uses `logo.png`, converted to `.icns` with the built-in macOS `sips` and `iconutil` tools during packaging. Windows builds generate and embed a multi-size `.ico` automatically.
+The macOS bundle is assembled in `tools/package_desktop.py` from `macos/Info.plist` and `macos/TerraMars.icns`, so the bundle identity, icon and `NSMicrophoneUsageDescription` stay in the repository instead of being duplicated in each workflow.
 
-[Desktop builds](.github/workflows/desktop-builds.yml) now runs **Rust** formatting, Clippy, tests and release builds on matching GitHub-hosted Linux, macOS and Windows machines. It uploads a native archive for each target. Push the project, including `Cargo.lock`, `rust-toolchain.toml` and assets, then open **Actions → Desktop builds**. A local Linux build alone does not verify macOS or Windows.
+App icons come from `assets/icons/app_logo`: Windows and Linux use `logo_small.png`; macOS uses `logo.png`, laid out on Apple's icon grid and committed as `TerraMars.icns` by `python3 tools/make_macos_icon.py`. Windows builds generate and embed a multi-size `.ico` and a version resource automatically.
 
-Download and extract the matching `TerraMars-*` artifact. Linux contains an executable; Windows contains `terramars.exe`; macOS contains `TerraMars.app`. The macOS bundle receives an ad-hoc signature, not Developer ID signing or notarization. Public installers and Windows signing are not configured.
+[Desktop builds](.github/workflows/desktop-builds.yml) runs **Rust** formatting, Clippy, tests and release builds on matching GitHub-hosted Linux, macOS and Windows machines, and uploads a native archive for each target. [release-macos.yml](.github/workflows/release-macos.yml) builds a universal DMG on `v*` tags and signs, notarizes and publishes it when the Apple secrets are configured. Push the project, including `Cargo.lock`, `rust-toolchain.toml` and assets, then open **Actions → Desktop builds**. A local Linux build alone does not verify macOS or Windows.
+
+Download the matching `TerraMars-*` artifact. Linux is an AppImage (mark it executable and run it); Windows is a ZIP whose `TerraMars` folder holds `TerraMars.exe` plus the documentation and resources — extract it first and run the executable from inside that folder; macOS is a DMG containing `TerraMars.app`. The macOS bundle receives an ad-hoc signature unless the release workflow's Developer ID secrets are present; Windows signing is not configured, so SmartScreen can still ask for confirmation.
 
 ## Code layout
 
@@ -112,11 +114,10 @@ Download and extract the matching `TerraMars-*` artifact. Linux contains an exec
 src/main.rs                  Native GPUI application entry point
 src/ui/                      Shared shell, glass surfaces, map and interactions
 src/domain/                  Models, Mars clock, units, route planning and storage
-src/services/                NASA refresh, local voice bridge and route export
+src/services/                NASA refresh and route export
 assets/maps/                 Real CTX / MOLA maps, panorama and geographic manifest
 assets/data/                 Sourced observations, landmarks and rover snapshots
-assets/fonts/                Inter / Manrope and SIL Open Font Licenses
-tools/voice_bridge.py         Optional offline microphone command bridge
+assets/fonts/                Orbitron / Departure Mono and their font licenses
 tools/package_desktop.py      Native archive / macOS application packaging
 docs/                        Data sources, evidence limits and migration notes
 ```

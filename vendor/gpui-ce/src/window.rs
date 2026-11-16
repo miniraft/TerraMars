@@ -1774,6 +1774,10 @@ pub struct Window {
     /// The hitbox that has captured the pointer, if any.
     /// While captured, mouse events route to this hitbox regardless of hit testing.
     captured_hitbox: Option<HitboxId>,
+    /// While positive, elements are painted without registering hitboxes. Set
+    /// by [`Window::without_hitboxes`], which fading surfaces use so a closing
+    /// panel cannot swallow clicks meant for the controls behind it.
+    suppressed_hitboxes: usize,
     #[cfg(any(feature = "inspector", debug_assertions))]
     inspector: Option<Entity<Inspector>>,
     #[cfg(feature = "profiler")]
@@ -2733,6 +2737,7 @@ impl Window {
             client_inset: None,
             image_cache_stack: Vec::new(),
             captured_hitbox: None,
+            suppressed_hitboxes: 0,
             #[cfg(any(feature = "inspector", debug_assertions))]
             inspector: None,
             #[cfg(feature = "profiler")]
@@ -7000,6 +7005,24 @@ impl Window {
         };
 
         self.next_frame.hitboxes.push_mut(hitbox)
+    }
+
+    /// Returns whether hitboxes are currently suppressed by [`Window::without_hitboxes`].
+    pub(crate) fn hitboxes_suppressed(&self) -> bool {
+        self.suppressed_hitboxes > 0
+    }
+
+    /// Paints everything drawn inside `f` without registering hitboxes, so the pointer
+    /// keeps reaching the elements painted behind it.
+    ///
+    /// Surfaces use this while they fade out: the animation still draws the closing
+    /// panel, but a click landing on top of it goes to the control that was revealed
+    /// underneath instead of being swallowed by a panel the user already dismissed.
+    pub(crate) fn without_hitboxes<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.suppressed_hitboxes += 1;
+        let result = f(self);
+        self.suppressed_hitboxes -= 1;
+        result
     }
 
     /// Registers `hitbox` as the platform control `area` of a custom title bar.

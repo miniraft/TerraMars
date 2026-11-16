@@ -274,10 +274,18 @@ pub struct MapView {
     pub units: UnitSystem,
     // Normalized geometry changes only when NASA's recorded traverse changes.
     traverse: Arc<Vec<(f32, f32)>>,
+    /// Danger-run quads pre-normalized once so panning does not re-derive
+    /// thousands of geographic corners every frame.
+    danger_rects: Arc<Vec<[(f32, f32); 4]>>,
     drag: Option<(f32, f32, Camera)>,
     moved: bool,
     animation: Option<CameraAnimation>,
     pending_fit: Rc<RefCell<Option<NormalizedBounds>>>,
+    /// The previous base raster, faded out when MOLA relief is toggled.
+    terrain_fade_from: Option<Arc<RenderImage>>,
+    terrain_fade_until: Option<Instant>,
+    terrain_fade_generation: u64,
+    last_terrain: bool,
 }
 
 impl EventEmitter<MapSelection> for MapView {}
@@ -297,12 +305,32 @@ impl MapView {
                 .map(|&p| normalized(p, site.map_bounds))
                 .collect(),
         );
+        let terrain_grid = images.hazards[index].clone();
+        let bounds = site.map_bounds;
+        let danger_rects = Arc::new(
+            terrain_grid
+                .runs
+                .iter()
+                .map(|run| {
+                    let a = terrain_grid.corner(run.first as f64, run.row as f64);
+                    let z = terrain_grid.corner(run.end as f64, run.row as f64 + 1.);
+                    [
+                        a,
+                        GeoPoint::new(a.latitude, z.longitude),
+                        z,
+                        GeoPoint::new(z.latitude, a.longitude),
+                    ]
+                    .map(|p| normalized(p, bounds))
+                })
+                .collect::<Vec<_>>(),
+        );
         Self {
-            terrain_grid: images.hazards[index].clone(),
+            terrain_grid,
             site,
             index,
             images,
             traverse,
+            danger_rects,
             camera: Rc::new(RefCell::new(Camera::default())),
             options: MapOptions::default(),
             selected: None,
@@ -315,6 +343,10 @@ impl MapView {
             moved: false,
             animation: None,
             pending_fit: Rc::new(RefCell::new(None)),
+            terrain_fade_from: None,
+            terrain_fade_until: None,
+            terrain_fade_generation: 0,
+            last_terrain: false,
         }
     }
     pub fn rotate_by(&mut self, delta: f32) {
@@ -347,20 +379,17 @@ impl MapView {
         );
         self.site = site;
     }
+    /// Zooms about the centre of the viewport. Applied directly to the camera:
+    /// the control can be used before the map has been laid out (for example in
+    /// a preview opened from a snapshot), and an animated target built from a
+    /// zero-sized viewport would silently do nothing.
     pub fn zoom(&mut self, factor: f32) {
         self.advance_animation(Instant::now());
-        let mut target = *self.camera.borrow();
-        // Repeated zoom clicks accumulate toward the prior target while each
-        // transition still begins at the current displayed camera pose.
-        if let Some(animation) = self.animation {
-            animation.to.apply(&mut target);
-        }
-        let (x, y) = (
-            target.origin_x + target.width / 2.,
-            target.origin_y + target.height / 2.,
-        );
-        target.zoom_at(factor, x, y);
-        self.animate_to(target);
+        self.cancel_animation();
+        let mut camera = *self.camera.borrow();
+        let (x, y) = (camera.width / 2., camera.height / 2.);
+        camera.zoom_at(factor, x, y);
+        *self.camera.borrow_mut() = camera;
     }
     pub fn fit(&mut self) {
         let mut target = *self.camera.borrow();
@@ -631,13 +660,77 @@ impl Render for MapView {
         }
         let camera = self.camera.clone();
         let pending_fit = self.pending_fit.clone();
+        // Crossfade the base raster when MOLA relief is switched on or off.
+        let now = Instant::now();
+        if self.options.terrain != self.last_terrain {
+            self.last_terrain = self.options.terrain;
+            if cx.reduce_motion() {
+                self.terrain_fade_from = None;
+                self.terrain_fade_until = None;
+            } else {
+                self.terrain_fade_from = Some(if self.options.terrain {
+                    self.images.imagery[self.index].clone()
+                } else {
+                    self.images.terrain[self.index].clone()
+                });
+                self.terrain_fade_until = Some(now + Duration::from_millis(220));
+                self.terrain_fade_generation += 1;
+            }
+        }
+        if self
+            .terrain_fade_until
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.terrain_fade_from = None;
+            self.terrain_fade_until = None;
+        }
         let image = if self.options.terrain {
             self.images.terrain[self.index].clone()
         } else {
             self.images.imagery[self.index].clone()
         };
+        let fade_from = self.terrain_fade_from.clone().map(|old| {
+            let camera = self.camera.clone();
+            let generation = self.terrain_fade_generation;
+            let bounds = div().absolute().inset_0();
+            bounds
+                .with_animation(
+                    ElementId::named_usize("terrain-fade", generation as usize),
+                    Animation::new(Duration::from_millis(240))
+                        .with_easing(|t| 1. - (1. - t).powi(3)),
+                    |layer, t| layer.opacity(1. - t),
+                )
+                .child(
+                    canvas(
+                        |_, _, _| {},
+                        move |_, _, window, _| {
+                            let c = *camera.borrow();
+                            if c.width <= 0.0 || c.height <= 0.0 {
+                                return;
+                            }
+                            let center = c.screen(0.5, 0.5);
+                            let image_bounds = Bounds::new(
+                                point(px(center.0 - c.edge() / 2.), px(center.1 - c.edge() / 2.)),
+                                size(px(c.edge()), px(c.edge())),
+                            );
+                            let _ = window.paint_image_rotated(
+                                image_bounds,
+                                image_bounds,
+                                Corners::all(px(0.)),
+                                0.,
+                                old,
+                                0,
+                                false,
+                                -c.bearing,
+                            );
+                        },
+                    )
+                    .size_full(),
+                )
+        });
         let options = self.options.clone();
         let terrain_grid = self.terrain_grid.clone();
+        let danger_rects = self.danger_rects.clone();
         let bounds = self.site.map_bounds;
         let landmarks = self.site.landmarks.clone();
         let traverse = self.traverse.clone();
@@ -777,19 +870,23 @@ impl Render for MapView {
                             -c.bearing,
                         );
                         if options.dangers {
-                            for run in &terrain_grid.runs {
-                                let a = terrain_grid.corner(run.first as f64, run.row as f64);
-                                let z = terrain_grid.corner(run.end as f64, run.row as f64 + 1.);
-                                let points = [
-                                    a,
-                                    GeoPoint::new(a.latitude, z.longitude),
-                                    z,
-                                    GeoPoint::new(z.latitude, a.longitude),
-                                ]
-                                .map(|p| {
-                                    let n = normalized(p, bounds);
-                                    c.screen(n.0, n.1)
-                                });
+                            let (left, right) = (f32::from(b.left()), f32::from(b.right()));
+                            let (top, bottom) = (f32::from(b.top()), f32::from(b.bottom()));
+                            for rect in danger_rects.iter() {
+                                let points = rect.map(|(x, y)| c.screen(x, y));
+                                let (min_x, max_x) = points
+                                    .iter()
+                                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), p| {
+                                        (lo.min(p.0), hi.max(p.0))
+                                    });
+                                let (min_y, max_y) = points
+                                    .iter()
+                                    .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), p| {
+                                        (lo.min(p.1), hi.max(p.1))
+                                    });
+                                if max_x < left || min_x > right || max_y < top || min_y > bottom {
+                                    continue;
+                                }
                                 polygon(&points, rgba(0xff69456b), window);
                             }
                             let mut labels = 0;
@@ -959,7 +1056,10 @@ impl Render for MapView {
                         let bottom = f32::from(b.bottom());
                         if c.width >= 170.0 && c.height >= 130.0 {
                             let x = right - 218.0;
-                            let y = bottom - 29.0;
+                            // The compass button sits 16 px above the bottom
+                            // edge; end the scale card on the same line so the
+                            // two bottom-right controls share a baseline.
+                            let y = bottom - 28.0;
                             window.paint_quad(
                                 PaintQuad::new(Bounds::new(
                                     point(px(x - 12.0), px(y - 36.0)),
@@ -990,8 +1090,9 @@ impl Render for MapView {
                 )
                 .size_full(),
             )
+            .when_some(fade_from, |map, layer| map.child(layer))
             .child(
-                div().absolute().right_4().bottom_4().child(
+                div().absolute().right_3().bottom_3().child(
                     button("compass", "")
                         .w(px(64.))
                         .h(px(64.))
@@ -1194,8 +1295,10 @@ mod tests {
         )]));
         let images = Arc::new(Images {
             imagery: [image.clone(), image.clone()],
+            cards: [image.clone(), image.clone()],
             terrain: [image.clone(), image.clone()],
             panorama: image.clone(),
+            coming_soon: image.clone(),
             hazards: [
                 terramars::domain::terrain::TerrainGrid::bundled("jezero").unwrap(),
                 terramars::domain::terrain::TerrainGrid::bundled("gale").unwrap(),

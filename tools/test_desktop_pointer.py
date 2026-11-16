@@ -169,6 +169,16 @@ def main():
    until(lambda v:v['state']['endpoint_menu'] is None)
    click('calculate-route',lambda s:s['log_count']>=1 and s['route_count']>=1)
    check('route plan is logged through the real button',True)
+   # Rover mode follows the published drive, on foot keeps the direct screened line.
+   click('travel-mode');until(lambda v:'Recorded rover corridor' in v['state']['projected_time'],6);check('rover mode follows the recorded corridor',True)
+   click('travel-mode');until(lambda v:'On foot' in v['state']['projected_time'] and 'direct' in v['state']['projected_time'],6)
+   # Repeated mode taps recalculate but never append duplicate mission history.
+   log_before=state()['state']['log_count']
+   for _ in range(4):click('travel-mode');time.sleep(.05)
+   time.sleep(1.0)
+   check('mode recalculations do not duplicate mission history',state()['state']['log_count']==log_before)
+   if 'Rover' in state()['state']['projected_time']:click('travel-mode')
+   until(lambda v:'On foot' in v['state']['projected_time'])
    for _ in range(3):
     count=state()['state']['log_count'];click('calculate-route',lambda s:s['log_count']==count+1)
 
@@ -185,8 +195,8 @@ def main():
     assert clipped,'Expected a long route endpoint in compact layout'
     offset=state()['boxes'][clipped]['detail']['offset'];until(lambda v:abs(v['boxes'].get(clipped,{}).get('detail',{}).get('offset',offset)-offset)>2)
     check('overflowing labels actually scroll',True)
-   check('projected route time is visible','Projected' in state()['state']['projected_time'] and 'plan a route' not in state()['state']['projected_time'])
-   click('fit-route');until(lambda v:v['state']['zoom']>1.1);check('fit route replaces export',True)
+   check('route summary fills the planner header',bool(state()['state']['projected_time']) and 'plan a route' not in state()['state']['projected_time'])
+   click('fit-map');until(lambda v:v['state']['zoom']>1.1);check('fit map frames the planned route',True)
    click('layers-tab',lambda s:s['layers'] and s['details']);data=state();before=data['state']['map_options']['terrain']
    click('map-layer',lambda s:s['map_options']['terrain']!=before);check('right-hand layer switch responds',True);shot('layers')
    click('conditions-tab',lambda s:not s['layers']);zoom=state()['state']['zoom']
@@ -196,6 +206,9 @@ def main():
    click('show-details',lambda s:s['details']);click('show-details',lambda s:not s['details']);check('top location toggle opens and closes',True)
    click('start-point',lambda s:s['endpoint_menu']=='Start');click('coordinate-input',lambda s:s['coordinate_editing']);d.type('18.44,77.45');until(lambda v:v['state']['coordinate_text']=='18.44,77.45');click('apply-coordinates',lambda s:s['endpoint_menu'] is None and abs(s['start']['latitude']-18.44)<1e-7)
    check('typed coordinates can be chosen',state()['state']['selected']==original)
+   # The picker fades out instead of vanishing instantly, so wait until it has
+   # left the tree before reopening it, the way a person would.
+   until(lambda v:not any(k.startswith('Name("close-endpoint-menu")') for k in v['boxes']))
    click('start-point',lambda s:s['endpoint_menu']=='Start');click('close-endpoint-menu',lambda s:s['endpoint_menu'] is None);check('endpoint picker X closes',True)
    click('start-point',lambda s:s['endpoint_menu']=='Start');click('pick-on-map',lambda s:s['endpoint_menu'] is None);d.click(w,width*.65,240);until(lambda v:abs(v['state']['start']['latitude']-18.44)>1e-7);check('map endpoint picking preserves inspected point',state()['state']['selected']==original)
    check('rover focus and export controls removed',not any('focus-rover' in k or 'export-route' in k for k in state()['boxes']))
@@ -215,6 +228,7 @@ def main():
    last=next(k for k in state()['boxes'] if 'open-log-route' in k and ', 3)' in k and not k.startswith('button-label/'))
    click(last,lambda s:s['log_preview']);click('close-log-preview',lambda s:not s['log_preview']);check('mission log cards keep their height and scroll',True)
    click('open-log-route',lambda s:s['log_preview']);d.key(0xff1b);until(lambda v:not v['state']['log_preview']);check('Escape closes only the log preview',state()['state']['endpoint_menu']==browsing['endpoint_menu'])
+   click('clear-log',lambda s:s['log_count']==0);check('mission log header clears every saved route',True)
    click('home',lambda s:s['page']=='explorer');check('return from log restores complete browsing state',all(state()['state'][k]==v for k,v in browsing.items()))
    click('close-endpoint-menu',lambda s:s['endpoint_menu'] is None)
    click('toggle-planner',lambda s:not s['planner'])

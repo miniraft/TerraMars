@@ -4,9 +4,9 @@ The active desktop application is the Cargo project at the repository root. It u
 
 ## Application boundaries
 
-- `src/ui/` owns GPUI rendering, map interactions, navigation and finite UI transitions. The window title is **TerraMars**. Images and bundled Inter/Manrope fonts are compiled into the application.
+- `src/ui/` owns GPUI rendering, map interactions, navigation and finite UI transitions. The window title is **TerraMars**. Images and bundled Orbitron/Departure Mono fonts are compiled into the application.
 - `src/domain/` owns portable models, NASA Mars24 calculations, unit conversion, Mars-sphere route estimates and local preferences / route logs. It has no dependency on a platform's UI toolkit.
-- `src/services/` owns source-preserving NASA refresh, Mars-coordinate route export and retained legacy voice protocol utilities. Blocking network operations belong on worker threads, not the rendering thread.
+- `src/services/` owns source-preserving NASA refresh and Mars-coordinate route export. Blocking network operations belong on worker threads, not the rendering thread.
 - `assets/` retains the real source snapshots, map imagery, exact geographic bounds and credits from the earlier app. The rewrite does not replace these with decorative or generated maps.
 
 The inspected map location and the two route endpoints are separate state. Changing a route endpoint must not select that endpoint for inspection or move the camera. Selecting a map point prefills endpoint B when the planner opens. A successful plan is recorded automatically; the log represents plans rather than completed journeys.
@@ -31,7 +31,7 @@ The matrix builds Linux x86_64 and ARM64, macOS Intel x86_64 and Apple Silicon A
 
 Intel macOS builds target Catalina **10.15**, the floor supported by GPUI's native backend (which uses Metal's `supportsFamily:` API). Apple Silicon builds target **11.0**, the first macOS release for that architecture. `.cargo/config.toml` defaults `MACOSX_DEPLOYMENT_TARGET` to 10.15 for local builds, and CI explicitly selects the floor for each macOS architecture. Packaging uses the same setting for `LSMinimumSystemVersion`, with an 11.0 floor on ARM64. These are deployment targets; running on the oldest supported OS still requires testing on that OS, since the hosted runners use macOS 15.
 
-`tools/package_desktop.py` creates one file per platform: a Linux executable, a Windows `.exe`, and a macOS `.dmg` containing `TerraMars.app` and an Applications shortcut. The workflow uploads each file directly with `actions/upload-artifact@v7` and `archive: false`, so Actions downloads have no ZIP wrapper. Filenames include the platform and CPU architecture. On Linux, run `chmod +x TerraMars-linux-*` after downloading, then launch it; the binary still uses system desktop libraries and a compatible graphics driver. On macOS, mount the DMG and drag the app into Applications. Assets and font/GPUI license notices are embedded in the executable; run it with `--export-licenses <file>` to save those notices. Documentation, provenance snapshots and legacy voice scripts remain in the repository (and in the macOS bundle). The macOS bundle identifier is `org.terramars.app` and the display name is **TerraMars**. macOS packaging applies an ad-hoc signature. Developer ID signing / notarization and Windows signing remain separate release work.
+`tools/package_desktop.py` creates one file per platform: a Linux AppImage built from an AppDir with `appimagetool`, a Windows ZIP containing `TerraMars.exe` plus documentation, and a macOS `.dmg` containing `TerraMars.app` and an Applications shortcut. The workflow uploads each file directly with `actions/upload-artifact@v7` and `archive: false`. Filenames include the platform and CPU architecture. On Linux, mark the AppImage executable and run it; it still uses system desktop libraries and a compatible graphics driver. On macOS, mount the DMG and drag the app into Applications. Assets and font/GPUI license notices are embedded in the executable; run it with `--export-licenses <file>` to save those notices. Documentation and provenance snapshots remain in the repository (and in the macOS bundle). The macOS bundle identifier is `com.miniraft.terramars` and the display name is **TerraMars**. macOS packaging applies an ad-hoc signature. Developer ID signing / notarization and Windows signing remain separate release work.
 
 A host build validates that host. The GitHub matrix must finish successfully before macOS and Windows artifacts can be considered compiled and tested; this migration does not claim those builds were executed locally on Linux.
 
@@ -45,11 +45,11 @@ The scientific boundaries remain in [DATA_SOURCES.md](DATA_SOURCES.md) and [FEAT
 - Route ETA is distance divided by the user's assumed speed. Neither a rover corridor nor a colored MOLA image establishes a safe EVA route or a sampled slope.
 - Source failures retain the previous record. Missing observations remain distinct from source-backed regional climate predictions, and retrieval time does not become observation time.
 
-The microphone UI has been removed. Legacy bridge utilities remain documented in [VOICE.md](VOICE.md), but are not connected to the application. Regional MCD predictions and their limits are documented in [CLIMATE_MODEL.md](CLIMATE_MODEL.md).
+The microphone button is a placeholder that reports voice control as coming soon; no audio API is linked into the application. Regional MCD predictions and their limits are documented in [CLIMATE_MODEL.md](CLIMATE_MODEL.md).
 
 ## Local verification
 
-On Linux, the optimized Rust app builds successfully and passes 37 automated tests covering NASA Mars24, map camera bounds and animation, real-source parsing, units, routes, persistent logs, export, embedded icon registration, and retained voice protocol behavior. Formatting and Clippy pass with warnings denied for application code. 
+On Linux, the optimized Rust app builds successfully and passes the automated tests covering NASA Mars24, map camera bounds and animation, real-source parsing, units, routes, persistent logs, export, and embedded icon registration. Formatting and Clippy pass with warnings denied for application code. 
 
 The native GPU smoke driver passed all 12 checks on both X11 and Wayland, including the 800×600 compact layout on X11. It opens both regions and checks selection, endpoint independence, automatic route logging, an explicit route alternative, saved-log reload, Mars export scientific units, and pinch/rotation dispatch through the native GPUI window. It uses an isolated temporary mission directory so diagnostics do not modify the user's history:
 

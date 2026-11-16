@@ -324,17 +324,62 @@ impl TerrainGrid {
         );
         route.avoids_terrain_hazards = true;
         let mut routes = vec![route];
-        for mut route in RoutePlanner::plan(start, end, speed, traverse, &[])?
-            .into_iter()
-            .filter(|r| r.uses_observed_traverse)
-        {
-            if route.points.windows(2).all(|p| self.clear(p[0], p[1])) {
-                route.avoids_terrain_hazards = true;
-                routes.push(route);
-            }
+        if let Some(route) = self.rover_corridor(start, end, speed, traverse) {
+            routes.push(route);
         }
         Ok(routes)
     }
+
+    /// The rover option follows the published traverse rather than a straight
+    /// geometric line. The connecting legs from each endpoint to the corridor
+    /// are themselves terrain-screened, so choosing Rover never cuts through a
+    /// slope exclusion just to reach the recorded path.
+    fn rover_corridor(
+        &self,
+        start: Point,
+        end: Point,
+        speed: f64,
+        traverse: &[Point],
+    ) -> Option<RouteEstimate> {
+        if traverse.len() < 2 {
+            return None;
+        }
+        let a = super::routes::nearest_index(start, traverse);
+        let b = super::routes::nearest_index(end, traverse);
+        if a == b {
+            return None;
+        }
+        let corridor = if a <= b {
+            traverse[a..=b].to_vec()
+        } else {
+            traverse[b..=a].iter().rev().copied().collect()
+        };
+        // The legs between each endpoint and the corridor must still pass the
+        // slope screen. Inside the corridor, the published drive is the best
+        // available evidence: MOLA cells are ~463 m wide, so a few recorded
+        // samples land on flagged cells even though the rover drove there.
+        let mut points = self.connector(start, corridor[0])?;
+        points.extend_from_slice(&corridor[1..]);
+        let tail = self.connector(*corridor.last()?, end)?;
+        points.extend_from_slice(&tail[1..]);
+        // `avoids_terrain_hazards` stays false: the observed corridor itself is
+        // kept as recorded, and the risk note says so.
+        let route = estimate("Recorded rover corridor", points, speed, true, false);
+        Some(route)
+    }
+
+    /// A clear straight leg when possible, otherwise the shortest slope-screened
+    /// detour. Both results include the requested endpoints.
+    fn connector(&self, from: Point, to: Point) -> Option<Vec<Point>> {
+        if from == to {
+            return Some(vec![from]);
+        }
+        if self.clear(from, to) {
+            return Some(vec![from, to]);
+        }
+        self.detour(from, to)
+    }
+
     fn detour(&self, start: Point, end: Point) -> Option<Vec<Point>> {
         let (start_i, end_i) = (self.cell(start)?, self.cell(end)?);
         let w = self.metadata.columns;
@@ -465,11 +510,17 @@ mod tests {
             let a = site.landmarks[0].point;
             let b = site.landmarks[1].point;
             let routes = g.plan(a, b, 3., &site.traverse).unwrap();
+            let screened: Vec<_> = routes
+                .iter()
+                .filter(|r| !r.uses_observed_traverse)
+                .collect();
+            assert!(!screened.is_empty());
             assert!(
-                routes
+                screened
                     .iter()
                     .all(|r| r.points.windows(2).all(|p| g.clear(p[0], p[1])))
             );
+            assert!(routes.iter().any(|r| r.uses_observed_traverse));
             assert!(g.plan(g.zones[0].peak, b, 3., &[]).is_err());
         }
     }

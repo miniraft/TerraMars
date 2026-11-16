@@ -1,0 +1,137 @@
+name: Build and Notarize TerraMars macOS DMG
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Bundle version (defaults to Cargo.toml)
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  APP_NAME: TerraMars
+  BINARY_NAME: terramars
+  # One universal binary, so both architectures share the Big Sur floor.
+  MACOSX_DEPLOYMENT_TARGET: '11.0'
+
+jobs:
+  build-macos:
+    name: Universal macOS DMG
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      # Secrets are surfaced as env vars so step `if:` conditions can test
+      # whether signing and notarization are configured.
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+    steps:
+      - name: Check out project
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # rustup honors the exact version and components in rust-toolchain.toml,
+      # so the release build uses the same compiler as Desktop builds.
+      - name: Install pinned Rust toolchain
+        shell: bash
+        run: |
+          rustup show
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          rustc --version
+          cargo --version
+
+      - name: Validate macOS bundle metadata
+        run: |
+          xcodebuild -version
+          xcrun --find metal
+          plutil -lint macos/Info.plist macos/entitlements.plist
+          # The packager regenerates TerraMars.icns from this logo with sips/iconutil.
+          test -s assets/icons/app_logo/logo.png
+
+      - name: Build universal Rust binary
+        run: |
+          cargo build --locked --release --target aarch64-apple-darwin
+          cargo build --locked --release --target x86_64-apple-darwin
+          mkdir -p target/universal/release
+          lipo -create \
+            target/aarch64-apple-darwin/release/$BINARY_NAME \
+            target/x86_64-apple-darwin/release/$BINARY_NAME \
+            -output target/universal/release/$BINARY_NAME
+          lipo -archs target/universal/release/$BINARY_NAME
+
+      - name: Import Apple signing certificate
+        if: env.APPLE_CERTIFICATE_BASE64 != ''
+        uses: Apple-Actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      # Builds TerraMars.app from macos/Info.plist, embeds TerraMars.icns and
+      # signs with the hardened runtime, then produces
+      # dist/TerraMars-macos-universal.dmg.
+      - name: Package the signed DMG
+        shell: bash
+        run: |
+          version="${{ inputs.version }}"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          args=(--platform macos \
+                --binary-dir target/universal/release \
+                --arch universal)
+          [[ -n "$version" ]] && args+=(--version "$version")
+          [[ -n "$APPLE_SIGNING_IDENTITY" ]] && \
+            args+=(--sign-identity "$APPLE_SIGNING_IDENTITY")
+          python3 tools/package_desktop.py "${args[@]}"
+
+          if [[ -n "$APPLE_SIGNING_IDENTITY" ]]; then
+            codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
+              "dist/$APP_NAME-macos-universal.dmg"
+          fi
+
+      - name: Notarize and staple the DMG
+        if: env.APPLE_CERTIFICATE_BASE64 != '' && env.APPLE_API_KEY_BASE64 != ''
+        shell: bash
+        run: |
+          key="$RUNNER_TEMP/AuthKey.p8"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 -D > "$key"
+          xcrun notarytool submit "dist/$APP_NAME-macos-universal.dmg" \
+            --key "$key" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_ISSUER_ID" \
+            --wait
+          xcrun stapler staple "dist/$APP_NAME-macos-universal.dmg"
+          rm -f "$key"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.APP_NAME }}-macOS
+          path: dist/TerraMars-*.dmg
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish the DMG on the release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" \
+              --title "TerraMars $GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" dist/TerraMars-*.dmg --clobber

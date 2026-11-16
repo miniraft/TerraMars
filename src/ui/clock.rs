@@ -33,17 +33,16 @@ impl Render for ClockView {
         let (lon, lat) = self.location.unwrap_or((0., 0.));
         let mars = MarsClock::at(now, lon, lat);
         let title = if self.earth {
-            format!("{}  UTC", now.format("%H:%M:%S"))
+            now.format("%H:%M:%S").to_string()
         } else {
-            format!(
-                "{}  {}",
-                mars.formatted_local_time(),
-                if self.location.is_some() {
-                    "LMST"
-                } else {
-                    "AMT"
-                }
-            )
+            mars.formatted_local_time()
+        };
+        let zone = if self.earth {
+            "UTC"
+        } else if self.location.is_some() {
+            "LMST"
+        } else {
+            "AMT"
         };
         let date = if self.earth {
             now.format("%d %b %Y").to_string()
@@ -68,10 +67,32 @@ impl Render for ClockView {
             }))
             .child(
                 div()
-                    .text_size(px(18.))
-                    .font_weight(FontWeight::MEDIUM)
-                    .child(format!("{title}   ⇄")),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            // Departure Mono is a 7×14 pixel design with a
+                            // 550-unit em. Multiples of 11 map its design pixels
+                            // onto whole screen pixels, so digits keep equal
+                            // weight instead of alternating thin and thick
+                            // strokes. 22 px is two design pixels per unit.
+                            .text_size(px(22.))
+                            .line_height(px(22.))
+                            .font_weight(FontWeight::NORMAL)
+                            .child(title),
+                    )
+                    // The swap glyph comes from a fallback face, so it stays on
+                    // its own 11 px line instead of perturbing the time shaping.
+                    .child(
+                        label("⇄")
+                            .text_size(px(11.))
+                            .text_color(rgb(MUTED))
+                            .mt(px(2.)),
+                    ),
             )
-            .child(label(date).text_size(px(14.)))
+            // 11 px keeps the secondary line crisp and compact next to the
+            // 22 px time.
+            .child(label(format!("{zone} · {date}")).text_size(px(11.)))
     }
 }

@@ -1,3 +1,4 @@
+mod animation;
 mod app;
 mod assets;
 mod clock;

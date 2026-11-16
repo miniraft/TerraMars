@@ -36,8 +36,9 @@ Weather observations retain their historical dates. Climate predictions are mode
 
 - [Curiosity’s 1.8-billion-pixel panorama, PIA23623](https://science.nasa.gov/photojournal/curiositys-18-billion-pixel-panorama/) — current decorative background. Credit: NASA/JPL-Caltech/MSSS.
 - [Mastcam-Z’s first 360° panorama, PIA24264](https://www.jpl.nasa.gov/images/pia24264-mastcam-zs-first-360-degree-panorama/) — earlier background documented in the project.
-- [Inter](https://github.com/rsms/inter) — body font.
-- [Manrope](https://github.com/googlefonts/manrope) — heading font.
+- [Valles Marineris hemisphere, Viking 1 mosaic](https://commons.wikimedia.org/wiki/File:Mars_Valles_Marineris_EDIT.jpg) — Home “Coming Soon” card. Public domain, NASA/JPL/USGS.
+- [Departure Mono](https://departuremono.com/) — body font.
+- [Orbitron](https://github.com/theleagueof/orbitron) — heading font.
 
 ## Software and development resources
 
@@ -45,7 +46,6 @@ Weather observations retain their historical dates. Climate predictions are mode
 - [GPUI Community Edition](https://github.com/gpui-ce/gpui-ce) — desktop interface and platform backends.
 - Direct Rust libraries: [anyhow](https://crates.io/crates/anyhow), [chrono](https://crates.io/crates/chrono), [directories](https://crates.io/crates/directories), [image](https://crates.io/crates/image), [reqwest](https://crates.io/crates/reqwest), [serde](https://crates.io/crates/serde), [serde_json](https://crates.io/crates/serde_json), [env_logger](https://crates.io/crates/env_logger), [log](https://crates.io/crates/log), and [embed-resource](https://crates.io/crates/embed-resource).
 - [Python](https://www.python.org/) and [Pillow](https://pillow.readthedocs.io/) — data preparation, packaging, and image processing.
-- Retained voice utilities: [Vosk](https://alphacephei.com/vosk/), [Vosk models](https://alphacephei.com/vosk/models), and [sounddevice](https://python-sounddevice.readthedocs.io/). Voice input is removed from the current app.
 
 ## Project provenance records
 
@@ -57,6 +57,5 @@ Weather observations retain their historical dates. Climate predictions are mode
 - [Map sources, bounds, credits, and checksums](assets/maps/manifest.json).
 - [Current panorama provenance](assets/maps/panorama_source.json).
 - [Rust dependencies](Cargo.toml).
-- [Voice utility dependencies](tools/voice-requirements.txt).
 
 The user-provided **Space Apps 2026.docx** supplied feature requirements and research leads. No public link is recorded. Its statements are not treated as scientific measurements.

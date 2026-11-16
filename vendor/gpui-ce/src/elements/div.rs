@@ -2619,6 +2619,17 @@ pub struct Div {
 }
 
 impl Div {
+    /// Paints this element and its descendants without registering hitboxes, so the
+    /// mouse reaches whatever is painted behind them.
+    ///
+    /// Use it on a surface that is fading out: the animation still draws the closing
+    /// panel, but clicks land on the controls it used to cover instead of being
+    /// swallowed by a panel the user has already dismissed.
+    pub fn pointer_events_none(mut self) -> Self {
+        self.interactivity.pointer_events_none = true;
+        self
+    }
+
     /// Runs `listener` after the children have been prepainted, with their bounds in order.
     ///
     /// Use it to record where children ended up, for example to scroll to one of them later. The bounds are in window
@@ -3139,6 +3150,8 @@ pub struct Interactivity {
     pub(crate) tooltip_show_delay: Option<Duration>,
     pub(crate) window_control: Option<WindowControlArea>,
     pub(crate) hitbox_behavior: HitboxBehavior,
+    /// When set, prepaint paints this element's subtree without registering any hitboxes.
+    pub(crate) pointer_events_none: bool,
     pub(crate) tab_index: Option<isize>,
     pub(crate) tab_group: bool,
     pub(crate) tab_stop: bool,
@@ -3409,7 +3422,16 @@ impl Interactivity {
 
                             let scroll_offset =
                                 self.clamp_scroll_position(bounds, &style, window, cx);
-                            let result = f(&style, scroll_offset, hitbox, window, cx);
+                            // Descendants register their hitboxes while their prepaint runs,
+                            // so a click-through surface has to suppress them for the whole
+                            // subtree, not just for this element.
+                            let result = if self.pointer_events_none {
+                                window.without_hitboxes(|window| {
+                                    f(&style, scroll_offset, hitbox, window, cx)
+                                })
+                            } else {
+                                f(&style, scroll_offset, hitbox, window, cx)
+                            };
                             (result, element_state)
                         },
                     )
@@ -3419,6 +3441,9 @@ impl Interactivity {
     }
 
     fn should_insert_hitbox(&self, style: &Style, window: &Window, cx: &App) -> bool {
+        if self.pointer_events_none || window.hitboxes_suppressed() {
+            return false;
+        }
         self.hitbox_behavior != HitboxBehavior::Normal
             || self.window_control.is_some()
             || style.mouse_cursor.is_some()
@@ -5177,6 +5202,14 @@ where
 }
 
 impl<E> StatefulInteractiveElement for Stateful<E> where Self: InteractiveElement {}
+
+impl Stateful<Div> {
+    /// See [`Div::pointer_events_none`].
+    pub fn pointer_events_none(mut self) -> Self {
+        self.element = self.element.pointer_events_none();
+        self
+    }
+}
 
 impl<E> InteractiveElement for Stateful<E>
 where

@@ -13,10 +13,10 @@ fn main() -> anyhow::Result<()> {
         std::fs::write(
             destination,
             concat!(
-                "Inter font\n\n",
-                include_str!("../assets/fonts/Inter-OFL.txt"),
-                "\n\nManrope font\n\n",
-                include_str!("../assets/fonts/Manrope-OFL.txt"),
+                "Orbitron font\n\n",
+                include_str!("../assets/fonts/Orbitron/OFL.txt"),
+                "\n\nDeparture Mono font\n\n",
+                include_str!("../assets/fonts/DepartureMono-1.500/LICENSE"),
                 "\n\nGPUI Community Edition\n\n",
                 include_str!("../assets/licenses/GPUI-CE-LICENSE-APACHE.txt"),
                 "\n\nGPUI modifications\n\n",

@@ -107,6 +107,26 @@ pub struct PlannedRouteRecord {
 }
 
 impl PlannedRouteRecord {
+    /// Whether this record describes the same journey as `route`: same crater,
+    /// endpoints, travel mode and resulting geometry. Two plans of an identical
+    /// journey are the same mission, so the log keeps only one of them.
+    pub fn same_journey(
+        &self,
+        crater_id: &str,
+        start: &str,
+        end: &str,
+        mode: &str,
+        route: &RouteEstimate,
+    ) -> bool {
+        self.crater_id == crater_id
+            && self.start_label == start
+            && self.end_label == end
+            && self.mode == mode
+            && self.route.name == route.name
+            && self.route.points == route.points
+            && (self.route.distance_km - route.distance_km).abs() < f64::EPSILON
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.crater_id == "jezero" || self.crater_id == "gale",
@@ -217,6 +237,20 @@ impl MissionStore {
             .context("Could not replace mission history; previous data is preserved")
     }
 
+    /// Removes every saved plan. The previous history is restored if the new
+    /// file cannot be written, so a failed clear never loses data silently.
+    pub fn clear_routes(&mut self) -> Result<()> {
+        let previous = std::mem::take(&mut self.state.planned_routes);
+        if let Err(error) = self.save() {
+            self.state.planned_routes = previous;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Returns `true` when a new record was written, or `false` when the same
+    /// journey is already the newest log entry. Repeating "Plan route" for an
+    /// unchanged journey must not append another identical mission.
     pub fn record_route(
         &mut self,
         crater_id: &str,
@@ -224,7 +258,7 @@ impl MissionStore {
         end_label: &str,
         mode: &str,
         route: &RouteEstimate,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let record = PlannedRouteRecord {
             crater_id: crater_id.into(),
             start_label: start_label.into(),
@@ -234,12 +268,17 @@ impl MissionStore {
             planned_at: Utc::now(),
         };
         record.validate()?;
+        if self.state.planned_routes.first().is_some_and(|latest| {
+            latest.same_journey(crater_id, start_label, end_label, mode, route)
+        }) {
+            return Ok(false);
+        }
         self.state.planned_routes.insert(0, record);
         if let Err(error) = self.save() {
             self.state.planned_routes.remove(0);
             return Err(error);
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -335,6 +374,38 @@ mod tests {
         assert_eq!(reopened.state.planned_routes.len(), 1);
         assert_eq!(reopened.state.planned_routes[0].crater_id, "jezero");
         assert_eq!(reopened.state.planned_routes[0].route.points, route.points);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn repeating_an_unchanged_route_does_not_append_a_duplicate_mission() {
+        let directory = test_directory("duplicate");
+        let mut store = MissionStore::load(&directory).unwrap();
+        let route = RoutePlanner::plan(
+            Point::new(18.4, 77.5),
+            Point::new(18.41, 77.51),
+            3.0,
+            &[],
+            &[],
+        )
+        .unwrap()
+        .remove(0);
+        let log = |store: &mut MissionStore| {
+            store
+                .record_route("jezero", "Start", "Destination", "On foot", &route)
+                .unwrap()
+        };
+        assert!(log(&mut store), "first plan is a new mission");
+        assert!(!log(&mut store), "repeated plan is the same mission");
+        assert!(!log(&mut store), "spamming the button stays at one mission");
+        assert_eq!(store.state.planned_routes.len(), 1);
+        // A different journey is still recorded normally.
+        assert!(
+            store
+                .record_route("jezero", "Start", "Elsewhere", "On foot", &route)
+                .unwrap()
+        );
+        assert_eq!(store.state.planned_routes.len(), 2);
         fs::remove_dir_all(directory).unwrap();
     }
 

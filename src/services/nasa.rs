@@ -62,8 +62,11 @@ pub fn refresh_site(original: &MissionSite) -> RefreshResult {
     let sources = [
         (
             "Rover waypoint",
+            // The `_current` alias is rejected by NASA's CDN; the full waypoint
+            // collection is public and `latest_feature` already picks its newest
+            // drive, so the marker moves to the latest published localization.
             format!(
-                "https://mars.nasa.gov/mmgis-maps/{mission}/Layers/json/{mission}_waypoints_current.json"
+                "https://mars.nasa.gov/mmgis-maps/{mission}/Layers/json/{mission}_waypoints.json"
             ),
         ),
         (

@@ -1,7 +1,10 @@
 name: Desktop builds
 
 on:
+  # Branch pushes only: tagged releases are built by release-macos.yml, which
+  # signs and notarizes the DMG with the same macos/ metadata and icon.
   push:
+    branches: ['**']
   pull_request:
   workflow_dispatch:
 
@@ -65,14 +68,28 @@ jobs:
             libfontconfig1-dev libfreetype6-dev libwayland-dev \
             libx11-xcb-dev libxcb-shape0-dev libxcb-xfixes0-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libvulkan-dev \
-            libssl-dev libasound2-dev libzstd-dev
+            libssl-dev libasound2-dev libzstd-dev squashfs-tools zsync
 
-      - name: Verify macOS Metal tools
+      - name: Install AppImage tool
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          arch=x86_64
+          if [[ "${{ matrix.target }}" == aarch64-* ]]; then arch=aarch64; fi
+          url="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-$arch.AppImage"
+          curl -fsSL --retry 5 --retry-all-errors -o /tmp/appimagetool "$url"
+          chmod +x /tmp/appimagetool
+          echo "APPIMAGETOOL=/tmp/appimagetool" >> "$GITHUB_ENV"
+
+      - name: Verify macOS Metal tools and bundle metadata
         if: runner.os == 'macOS'
         run: |
           xcodebuild -version
           xcrun --find metal
           xcrun --find metallib
+          plutil -lint macos/Info.plist macos/entitlements.plist
+          # The packager regenerates TerraMars.icns from this logo with sips/iconutil.
+          test -s assets/icons/app_logo/logo.png
 
       # rustup honors the exact version and components in rust-toolchain.toml.
       - name: Install pinned Rust toolchain
@@ -112,7 +129,19 @@ jobs:
 
       - name: Package native application
         shell: bash
-        run: python3 tools/package_desktop.py --platform ${{ matrix.platform }} --binary-dir target/${{ matrix.target }}/release
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          # Report the compiled target, not the runner's own architecture.
+          arch=x86_64
+          case "${{ matrix.target }}" in aarch64-*) arch=arm64 ;; esac
+          python3 tools/package_desktop.py \
+            --platform ${{ matrix.platform }} \
+            --binary-dir target/${{ matrix.target }}/release \
+            --arch "$arch"
+          if [[ "${{ matrix.platform }}" == linux ]]; then
+            test -s "dist/TerraMars-linux-$arch.AppImage"
+          fi
 
       - name: Upload native application
         uses: actions/upload-artifact@v7

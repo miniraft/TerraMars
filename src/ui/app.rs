@@ -1,4 +1,5 @@
 use super::{
+    animation::{self, Fade},
     assets::Images,
     clock::{ClockView, TimeToggled},
     map::{MapSelection, MapView},
@@ -61,17 +62,68 @@ pub struct TerraMars {
     route_index: usize,
     mode: String,
     status: String,
+    status_open: bool,
+    status_pinned: bool,
     status_version: u64,
     status_task: Option<Task<()>>,
     refreshing: bool,
     refresh_notes: Vec<String>,
     refresh_expanded: bool,
+    /// Every surface that can appear or disappear fades through one shared
+    /// animation vocabulary. `sync_fades` keeps this in step with the fields
+    /// above at the start of each render.
+    fades: Fades,
+    endpoint_last: Endpoint,
+    map_pick_last: Endpoint,
+    log_preview_open: bool,
+    log_danger_last: Option<(usize, domain::Point)>,
+    routes_last: Vec<RouteEstimate>,
+    last_layers: bool,
     focus: FocusHandle,
     transition: u64,
     page_transition: u64,
     rendered_page: Page,
     planning: bool,
     planning_version: u64,
+    replan_task: Option<Task<()>>,
+    /// Height of the open planner body as measured in the last frame it was
+    /// open. Collapsing animates from this real height instead of the panel's
+    /// maximum, so the whole shrink happens at a steady pace.
+    planner_height: std::rc::Rc<std::cell::Cell<f32>>,
+    /// Height frozen when the planner starts opening or closing, plus the fade
+    /// generation that froze it, so the animation has one stable endpoint.
+    planner_from: std::cell::Cell<f32>,
+    planner_gen: std::cell::Cell<u64>,
+}
+
+struct Fades {
+    details: Fade,
+    endpoint: Fade,
+    map_pick: Fade,
+    planner: Fade,
+    notes: Fade,
+    preview: Fade,
+    danger: Fade,
+    toast: Fade,
+    routes: Fade,
+    tab: Fade,
+}
+
+impl Fades {
+    fn new() -> Self {
+        Self {
+            details: Fade::new(false),
+            endpoint: Fade::new(false),
+            map_pick: Fade::new(false),
+            planner: Fade::new(false),
+            notes: Fade::new(false),
+            preview: Fade::new(false),
+            danger: Fade::new(false),
+            toast: Fade::new(false),
+            routes: Fade::new(false),
+            tab: Fade::new(true),
+        }
+    }
 }
 
 struct Panorama {
@@ -81,19 +133,20 @@ impl Render for Panorama {
     fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let _timing = performance::scope("panorama_render_callback");
         let height = f32::from(window.viewport_size().height).max(1.);
-        let period = (height * (1660. / 342.)).max(f32::from(window.viewport_size().width));
+        // The asset already contains two identical, seamlessly crossfaded loops
+        // (3320 × 342), so a single image draws the whole background. Sliding it
+        // by exactly one loop and restarting is invisible.
+        let loop_len = (height * (1660. / 342.)).max(f32::from(window.viewport_size().width));
         let layer = div()
             .absolute()
             .top_0()
             .h_full()
-            .w(px(period * 2.))
-            .flex()
-            .child(img(self.image.clone()).w(px(period)).h_full())
-            .child(img(self.image.clone()).w(px(period)).h_full());
+            .w(px(loop_len * 2.))
+            .child(img(self.image.clone()).size_full());
         let layer = layer.with_animation(
             "panorama",
             Animation::new(Duration::from_secs(160)).repeat(),
-            move |e, t| e.left(px(-period * t)),
+            move |e, t| e.left(px(-loop_len * t)),
         );
         div()
             .size_full()
@@ -172,17 +225,30 @@ impl TerraMars {
             route_index: 0,
             mode: "On foot".into(),
             status: String::new(),
+            status_open: false,
+            status_pinned: false,
             status_version: 0,
             status_task: None,
             refreshing: false,
             refresh_notes: vec![],
             refresh_expanded: false,
+            fades: Fades::new(),
+            endpoint_last: Endpoint::Start,
+            map_pick_last: Endpoint::Start,
+            log_preview_open: false,
+            log_danger_last: None,
+            routes_last: vec![],
+            last_layers: false,
             focus: cx.focus_handle(),
             transition: 0,
             page_transition: 0,
             rendered_page: Page::Home,
             planning: false,
             planning_version: 0,
+            replan_task: None,
+            planner_height: std::rc::Rc::new(std::cell::Cell::new(0.)),
+            planner_from: std::cell::Cell::new(0.),
+            planner_gen: std::cell::Cell::new(0),
         }
     }
     fn units(&self) -> UnitSystem {
@@ -303,7 +369,7 @@ impl TerraMars {
                             );
                         }
                         660 => {
-                            this.plan(cx);
+                            this.plan(true, cx);
                         }
                         720 => {
                             performance::set_stage("route");
@@ -341,7 +407,7 @@ impl TerraMars {
                         }
                         790 => {
                             this.page = Page::Log;
-                            this.status.clear();
+                            this.dismiss_status(cx);
                             performance::set_stage("mission_log");
                             let loaded =
                                 MissionStore::load(this.store.file_path().parent().unwrap());
@@ -455,19 +521,53 @@ impl TerraMars {
     }
     fn set_status(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
         self.status = message.into();
+        self.status_open = true;
+        self.status_pinned = false;
         self.status_version += 1;
         let version = self.status_version;
+        // Notifications leave after five seconds without interaction. Any
+        // pointer or keyboard attention pins the toast until it is closed.
         self.status_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_secs(5)).await;
             let _ = this.update(cx, |this, cx| {
-                if this.status_version == version {
-                    this.status.clear();
-                    this.refresh_expanded = false;
-                    cx.notify();
+                if this.status_version == version && !this.status_pinned {
+                    this.dismiss_status(cx);
                 }
             });
         }));
         cx.notify();
+    }
+    fn dismiss_status(&mut self, cx: &mut Context<Self>) {
+        if !self.status_open {
+            return;
+        }
+        self.status_open = false;
+        self.refresh_expanded = false;
+        // Dropping the handle cancels the inactivity timer.
+        self.status_task = None;
+        cx.notify();
+    }
+    fn pin_status(&mut self, cx: &mut Context<Self>) {
+        if self.status_open && !self.status_pinned {
+            self.status_pinned = true;
+            self.status_task = None;
+            cx.notify();
+        }
+    }
+    fn sync_fades(&self, cx: &mut Context<Self>) {
+        self.fades.details.sync(self.details, cx);
+        self.fades.endpoint.sync(self.endpoint_menu.is_some(), cx);
+        self.fades.map_pick.sync(self.map_pick.is_some(), cx);
+        self.fades.planner.sync(self.planner, cx);
+        self.fades
+            .notes
+            .sync(self.refresh_expanded && self.status_open, cx);
+        self.fades.preview.sync(self.log_preview_open, cx);
+        self.fades
+            .danger
+            .sync(self.log_preview_open && self.log_danger.is_some(), cx);
+        self.fades.toast.sync(self.status_open, cx);
+        self.fades.routes.sync(!self.routes.is_empty(), cx);
     }
     fn save(&mut self, cx: &mut Context<Self>) {
         if let Err(e) = self.store.save() {
@@ -489,7 +589,8 @@ impl TerraMars {
         self.planner = false;
         self.endpoint_menu = None;
         self.map_pick = None;
-        self.status.clear();
+        self.replan_task = None;
+        self.dismiss_status(cx);
         self.transition += 1;
         let map = cx.new(|_| {
             let mut map = MapView::new(self.sites[index].clone(), index, self.images.clone());
@@ -564,14 +665,17 @@ impl TerraMars {
         self.sync_map(cx);
         cx.notify();
     }
-    fn plan(&mut self, cx: &mut Context<Self>) {
+    fn plan(&mut self, record: bool, cx: &mut Context<Self>) {
         let (Some(start), Some(end)) = (&self.start, &self.end) else {
             self.set_status("Choose a starting point and a destination.", cx);
             cx.notify();
             return;
         };
         if self.planning {
-            return;
+            // A newer mode/speed/endpoint choice supersedes the in-flight
+            // calculation; its result is ignored when it arrives.
+            self.planning_version += 1;
+            self.planning = false;
         }
         let (start_point, end_point) = (start.point, end.point);
         let speed = self.store.state.settings.speed_kmh;
@@ -603,9 +707,24 @@ impl TerraMars {
                 }
                 match result {
                     Ok(routes) => {
+                        // The planner always returns the terrain-screened direct
+                        // route first and the recorded rover corridor second.
+                        // Each travel mode selects its own geometry: Rover
+                        // follows the published traverse, on foot takes the
+                        // direct screened path.
+                        let preferred = if mode == "Rover" {
+                            routes.iter().position(|r| r.uses_observed_traverse)
+                        } else {
+                            routes.iter().position(|r| !r.uses_observed_traverse)
+                        };
+                        this.route_index = preferred.unwrap_or(0);
                         this.routes = routes;
-                        this.route_index = 0;
-                        this.record_route(cx);
+                        // Only an explicit "Plan route" adds a mission-log
+                        // entry. Mode, speed and endpoint recalculations update
+                        // the live route without spamming duplicate history.
+                        if record {
+                            this.record_route(cx);
+                        }
                         this.sync_map(cx);
                     }
                     Err(error) => {
@@ -621,6 +740,23 @@ impl TerraMars {
         cx.notify();
     }
 
+    /// Recalculates an existing route after the transport mode or assumed
+    /// speed changes, so the planner never needs a second "Plan route" click.
+    /// A short delay coalesces repeated speed taps into one calculation.
+    fn replan_if_ready(&mut self, cx: &mut Context<Self>) {
+        if self.start.is_none() || self.end.is_none() {
+            self.routes.clear();
+            self.sync_map(cx);
+            return;
+        }
+        self.replan_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(220))
+                .await;
+            let _ = this.update(cx, |this, cx| this.plan(false, cx));
+        }));
+        cx.notify();
+    }
     fn record_route(&mut self, cx: &mut Context<Self>) {
         if let (Some(start), Some(end), Some(route)) =
             (&self.start, &self.end, self.routes.get(self.route_index))
@@ -632,7 +768,10 @@ impl TerraMars {
                 &self.mode,
                 route,
             ) {
-                Ok(()) => self.set_status("Route planned and added to Mission log.", cx),
+                Ok(true) => self.set_status("Route planned and added to Mission log.", cx),
+                Ok(false) => {
+                    self.set_status("Route already in Mission log; it was not added again.", cx)
+                }
                 Err(e) => {
                     self.set_status(format!("Route calculated; saving the log failed: {e}"), cx)
                 }
@@ -706,8 +845,7 @@ impl TerraMars {
         if e.keystroke.key == "escape" {
             if self.page == Page::Log {
                 if self.log_danger.take().is_none() {
-                    self.log_preview = None;
-                    self.log_preview_index = None;
+                    self.log_preview_open = false;
                 }
                 cx.notify();
                 return;
@@ -792,7 +930,9 @@ impl TerraMars {
         cx.notify();
     }
     fn header(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let header_width = f32::from(window.viewport_size().width);
+        // The header floats HEADER_INSET from every window edge, so its own
+        // width is the window minus both side margins.
+        let header_width = (f32::from(window.viewport_size().width) - 2. * HEADER_INSET).max(320.);
         let narrow = header_width < 1250.;
         let show_brand = header_width >= 1150.;
         div()
@@ -802,19 +942,25 @@ impl TerraMars {
             .flex()
             .items_center()
             .justify_between()
-            .gap_2()
-            .px_4()
-            .h(px(82.))
+            .gap(SPACE)
+            .px_3()
+            .h(px(HEADER_HEIGHT))
+            // Internal padding matches HEADER_INSET on every side.
+            .pb_3()
             .flex_shrink_0()
+            .rounded(px(14.))
             .backdrop_blur(BLUR)
-            .bg(rgba(0x10151b60))
-            .border_b_1()
-            .border_color(rgba(0xffffff20))
+            // Warm, translucent glass so the header blurs the scene like the
+            // panels below it while picking up a faint orange cast.
+            .bg(rgba(0x2a17109a))
+            .border_1()
+            .border_color(rgba(0xff945e38))
+            .shadow_lg()
             .when(show_brand, |header| {
                 header.child(
                     div()
                         .absolute()
-                        .left_4()
+                        .left_3()
                         .top_0()
                         .h_full()
                         .flex()
@@ -840,13 +986,13 @@ impl TerraMars {
                     .left(px(if show_brand {
                         (header_width - 200.) / 2.
                     } else {
-                        16.
+                        HEADER_INSET
                     }))
                     .flex()
                     .items_center()
                     .justify_center()
                     .when(!show_brand, |d| d.justify_start())
-                    .gap_4()
+                    .gap(SPACE)
                     .child(
                         nav("home", "Home", self.page != Page::Log).on_click(cx.listener(
                             |this, _, _, cx| {
@@ -854,7 +1000,7 @@ impl TerraMars {
                                 if let Some(map) = &this.map {
                                     map.update(cx, |_, cx| cx.notify());
                                 }
-                                this.status.clear();
+                                this.dismiss_status(cx);
                                 let location = if this.browse_page == Page::Explorer {
                                     let site = &this.sites[this.site_index];
                                     Some((site.longitude, site.latitude))
@@ -874,7 +1020,7 @@ impl TerraMars {
                         nav("mission-log", "Mission log", self.page == Page::Log).on_click(
                             cx.listener(|this, _, _, cx| {
                                 this.page = Page::Log;
-                                this.status.clear();
+                                this.dismiss_status(cx);
                                 cx.notify();
                             }),
                         ),
@@ -883,16 +1029,16 @@ impl TerraMars {
             .child(
                 div()
                     .absolute()
-                    .right_4()
+                    .right_3()
                     .top_0()
                     .h_full()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap(SPACE)
                     .child(
                         div()
                             .flex()
-                            .p_1()
+                            .p(px(2.))
                             .rounded(px(10.))
                             .bg(rgba(0xffffff08))
                             .border_1()
@@ -901,6 +1047,7 @@ impl TerraMars {
                             .child(
                                 segment(
                                     "units-metric",
+                                    "metric",
                                     "Metric",
                                     self.units() == UnitSystem::Metric,
                                     narrow,
@@ -912,6 +1059,7 @@ impl TerraMars {
                             .child(
                                 segment(
                                     "units-scientific",
+                                    "scientific",
                                     "Scientific",
                                     self.units() == UnitSystem::Scientific,
                                     narrow,
@@ -922,8 +1070,21 @@ impl TerraMars {
                             ),
                     )
                     .child(
+                        // Microphone: voice control is not available yet, so the
+                        // button explains itself instead of starting a session.
+                        button("voice-toggle", "")
+                            .w(px(44.))
+                            .h(px(44.))
+                            .p_0()
+                            .flex_shrink_0()
+                            .child(icon("mic").text_color(rgb(INK)))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.set_status("Voice functionality coming soon", cx)
+                            })),
+                    )
+                    .child(
                         button("refresh", if self.refreshing { "…" } else { "" })
-                            .px_3()
+                            .px_2()
                             .child(icon("refresh"))
                             .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
                     )
@@ -933,15 +1094,30 @@ impl TerraMars {
     }
     fn home(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let width = f32::from(window.viewport_size().width);
-        let card_w = ((width - 100.) / 2.).clamp(280., 440.);
-        let card_h = (f32::from(window.viewport_size().height) - 180.).clamp(260., 370.);
+        // Three cards share one row. The title scales with the card so region
+        // names stay on a single line at the default window size.
+        let card_w = ((width - 128.) / 3.).clamp(210., 380.);
+        let card_h = (f32::from(window.viewport_size().height) - 180.).clamp(240., 370.);
+        let title_size = (card_w * 0.088).clamp(18., 34.);
+        let arrow = || {
+            div()
+                .size(px(38.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(10.))
+                .border_1()
+                .border_color(rgba(0xffffff66))
+                .text_size(px(18.))
+                .child("↗")
+        };
         let mut cards = div()
             .relative()
             .size_full()
             .flex()
             .items_center()
             .justify_center()
-            .gap_6();
+            .gap(SPACE_LOOSE);
         for (i, name) in ["Jezero Crater", "Gale Crater"].iter().enumerate() {
             let card = div()
                 .occlude()
@@ -958,7 +1134,7 @@ impl TerraMars {
                 .hover(|s| s.border_color(rgb(ORANGE)))
                 .on_click(cx.listener(move |this, _, _, cx| this.open_site(i, cx)))
                 .child(
-                    img(self.images.imagery[i].clone())
+                    img(self.images.cards[i].clone())
                         .absolute()
                         .size_full()
                         .object_fit(ObjectFit::Fill)
@@ -971,43 +1147,58 @@ impl TerraMars {
                         .flex()
                         .flex_col()
                         .justify_between()
-                        .p_7()
+                        .p_6()
+                        .child(heading(*name, title_size))
+                        .child(div().flex().justify_end().child(arrow())),
+                );
+            cards = cards.child(card);
+        }
+        // A third, non-interactive card previews the next region. The image is
+        // NASA's public-domain Viking 1 global mosaic of Valles Marineris.
+        cards = cards.child(
+            div()
+                .occlude()
+                .border_1()
+                .border_color(rgba(0xffffff2e))
+                .shadow_lg()
+                .w(px(card_w))
+                .h(px(card_h))
+                .relative()
+                .overflow_hidden()
+                .rounded(px(10.))
+                .child(
+                    img(self.images.coming_soon.clone())
+                        .absolute()
+                        .size_full()
+                        .object_fit(ObjectFit::Fill)
+                        .rounded(px(10.)),
+                )
+                .child(
+                    div()
+                        .relative()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .justify_between()
+                        .p_6()
+                        .child(heading("Coming Soon…", title_size * 0.9))
                         .child(
                             div()
                                 .flex()
                                 .items_end()
                                 .justify_between()
-                                .gap_4()
-                                .child(
-                                    heading(*name, if width < 1000. { 34. } else { 42. })
-                                        .shadow_md(),
-                                )
-                                .child(
-                                    div()
-                                        .size(px(44.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(px(10.))
-                                        .border_1()
-                                        .border_color(rgba(0xffffff66))
-                                        .child("↗"),
-                                ),
+                                .gap_2()
+                                .child(label("Valles Marineris").text_size(px(13.))),
                         ),
-                );
-            cards = cards.child(card);
-        }
+                ),
+        );
         div()
             .relative()
             .flex_1()
             .w_full()
             .overflow_hidden()
             .child(div().absolute().size_full().child(self.panorama.clone()))
-            .child(reveal(
-                cards,
-                ("home-enter", self.transition as usize),
-                false,
-            ))
+            .child(animation::fade_in("home-enter", cards, self.transition))
             .into_any_element()
     }
 
@@ -1026,53 +1217,121 @@ impl TerraMars {
             .overflow_hidden()
             .child(map.clone())
             .child(
-                div().absolute().top(px(98.)).left_4().child(
-                    glass()
-                        .occlude()
-                        .px_4()
-                        .py_3()
-                        .child(
-                            div()
-                                .flex()
-                                .gap_3()
-                                .items_center()
-                                .child(
-                                    button("back-to-regions", "")
-                                        .px_2()
-                                        .child(icon("back"))
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.page = Page::Home;
-                                            this.browse_page = Page::Home;
-                                            this.status.clear();
-                                            this.clock.update(cx, |clock, cx| {
-                                                clock.location = None;
+                div()
+                    .absolute()
+                    .top(CONTENT_TOP)
+                    .left_3()
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .gap(SPACE)
+                    .child(
+                        glass()
+                            .occlude()
+                            .px_4()
+                            .py_3()
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_3()
+                                    .items_center()
+                                    .child(
+                                        button("back-to-regions", "")
+                                            .px_2()
+                                            .child(icon("back"))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.page = Page::Home;
+                                                this.browse_page = Page::Home;
+                                                this.dismiss_status(cx);
+                                                this.clock.update(cx, |clock, cx| {
+                                                    clock.location = None;
+                                                    cx.notify();
+                                                });
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(heading(name, 18.))
+                                    .child(label(if options.terrain {
+                                        "MOLA relief"
+                                    } else {
+                                        "NASA CTX imagery"
+                                    })),
+                            )
+                            .child(
+                                label(if options.terrain {
+                                    "NASA/JPL/GSFC · Mars 2000"
+                                } else {
+                                    "NASA/JPL/MSSS/Caltech/Esri · Mars 2000"
+                                })
+                                .text_size(px(15.)),
+                            ),
+                    )
+                    // One SPACE between the region card and the icon toolbar,
+                    // matching every other stacked group in the app.
+                    .child(
+                        div()
+                            .flex()
+                            .when(compact_controls, |d| d.flex_row())
+                            .when(!compact_controls, |d| d.flex_col())
+                            .items_start()
+                            .gap(SPACE_TIGHT)
+                            .child(map_button("zoom-in", "+").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if let Some(m) = &this.map {
+                                        m.update(cx, |m, cx| {
+                                            m.zoom(1.35);
+                                            cx.notify();
+                                        });
+                                    }
+                                },
+                            )))
+                            .child(map_button("zoom-out", "−").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if let Some(m) = &this.map {
+                                        m.update(cx, |m, cx| {
+                                            m.zoom(1. / 1.35);
+                                            cx.notify();
+                                        });
+                                    }
+                                },
+                            )))
+                            .child(
+                                // One control for both jobs: frame the planned
+                                // route when there is one, otherwise reset the
+                                // map to its full extent.
+                                map_button(
+                                    "fit-map",
+                                    icon(if self.routes.is_empty() {
+                                        "fit"
+                                    } else {
+                                        "route"
+                                    }),
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        let route = this
+                                            .routes
+                                            .get(this.route_index)
+                                            .map(|r| r.points.clone());
+                                        if let Some(m) = &this.map {
+                                            m.update(cx, |m, cx| {
+                                                match &route {
+                                                    Some(points) => m.fit_route(points),
+                                                    None => m.fit(),
+                                                }
                                                 cx.notify();
                                             });
-                                            cx.notify();
-                                        })),
-                                )
-                                .child(heading(name, 18.))
-                                .child(label(if options.terrain {
-                                    "MOLA relief"
-                                } else {
-                                    "NASA CTX imagery"
-                                })),
-                        )
-                        .child(
-                            label(if options.terrain {
-                                "NASA/JPL/GSFC · Mars 2000"
-                            } else {
-                                "NASA/JPL/MSSS/Caltech/Esri · Mars 2000"
-                            })
-                            .text_size(px(15.)),
-                        ),
-                ),
+                                        }
+                                    },
+                                )),
+                            ),
+                    ),
             )
             .child(
                 div()
                     .absolute()
-                    .top(px(98.))
-                    .right_4()
+                    .top(CONTENT_TOP)
+                    .right_3()
                     .flex()
                     .gap_2()
                     .child(
@@ -1094,122 +1353,72 @@ impl TerraMars {
                             })),
                     ),
             )
-            .child(
-                div().absolute().left_4().top(px(204.)).child(
-                    div()
-                        .flex()
-                        .when(compact_controls, |d| d.flex_row())
-                        .when(!compact_controls, |d| d.flex_col())
-                        .gap_1()
-                        .child(
-                            button("zoom-in", "+").on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(m) = &this.map {
-                                    m.update(cx, |m, cx| {
-                                        m.zoom(1.35);
-                                        cx.notify();
-                                    });
-                                }
-                            })),
-                        )
-                        .child(
-                            button("zoom-out", "−").on_click(cx.listener(|this, _, _, cx| {
-                                if let Some(m) = &this.map {
-                                    m.update(cx, |m, cx| {
-                                        m.zoom(1. / 1.35);
-                                        cx.notify();
-                                    });
-                                }
-                            })),
-                        )
-                        .child(
-                            button("fit-map", "")
-                                .child(icon("fit"))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let Some(m) = &this.map {
-                                        m.update(cx, |m, cx| {
-                                            m.fit();
-                                            cx.notify();
-                                        });
-                                    }
-                                })),
-                        ),
-                ),
-            )
             .child(self.planner_view(width, f32::from(window.viewport_size().height), cx));
-        if self.details {
-            view = view.child(self.details_view(window, cx));
+        if self.fades.details.present() {
+            view = view.child(
+                self.fades
+                    .details
+                    .element("details-panel", self.details_view(window, cx)),
+            );
         }
-        if self.endpoint_menu.is_some() {
-            view = view.child(self.endpoint_picker(
-                width,
-                f32::from(window.viewport_size().height) - 82.,
-                cx,
+        if self.fades.endpoint.present() {
+            let endpoint = self.endpoint_menu.unwrap_or(self.endpoint_last);
+            view = view.child(self.fades.endpoint.element(
+                "endpoint-picker",
+                self.endpoint_picker(
+                    endpoint,
+                    width,
+                    f32::from(window.viewport_size().height),
+                    cx,
+                ),
             ));
         }
-        if let Some(endpoint) = self.map_pick {
-            view =
-                view.child(
-                    div().absolute().top(px(90.)).left(px(24.)).child(
-                        glass()
-                            .occlude()
-                            .p_4()
-                            .child(format!(
-                                "Click the map to choose your {} point",
-                                if endpoint == Endpoint::Start {
-                                    "starting"
-                                } else {
-                                    "ending"
-                                }
-                            ))
-                            .child(button("cancel-map-pick", "Cancel").mt_2().on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.map_pick = None;
-                                    cx.notify();
-                                }),
-                            )),
+        if self.fades.map_pick.present() {
+            let endpoint = self.map_pick.unwrap_or(self.map_pick_last);
+            let hint = div().absolute().top(CONTENT_TOP).left_3().child(
+                glass()
+                    .occlude()
+                    .p_4()
+                    .child(format!(
+                        "Click the map to choose your {} point",
+                        if endpoint == Endpoint::Start {
+                            "starting"
+                        } else {
+                            "ending"
+                        }
+                    ))
+                    .child(
+                        button("cancel-map-pick", "Cancel")
+                            .mt_2()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.map_pick = None;
+                                cx.notify();
+                            })),
                     ),
-                );
+            );
+            view = view.child(self.fades.map_pick.element("map-pick-hint", hint));
         }
         view.into_any_element()
     }
 
-    fn projected_time(&self, cx: &App) -> String {
+    /// The one-line route summary. Empty until a route exists, so the planner
+    /// reserves that line without showing placeholder instructions.
+    fn route_summary(&self) -> String {
         let Some(route) = self.routes.get(self.route_index) else {
-            return "Projected time · plan a route".into();
-        };
-        let duration =
-            chrono::Duration::seconds(route.duration_seconds.min(i64::MAX as u64) as i64);
-        let Some(arrival) = Utc::now().checked_add_signed(duration) else {
-            return format!(
-                "Projected · {}",
-                UnitSystem::duration(route.duration_seconds)
-            );
-        };
-        let arrival = if self.clock.read(cx).earth {
-            format!("{} UTC", arrival.format("%H:%M"))
-        } else {
-            let p = self
-                .end
-                .as_ref()
-                .map(|l| l.point)
-                .unwrap_or_else(|| self.sites[self.site_index].center());
-            format!(
-                "{} LMST",
-                MarsClock::at(arrival, p.longitude, p.latitude).formatted_local_time()
-            )
+            return String::new();
         };
         format!(
-            "Projected · {} · {arrival}",
-            UnitSystem::duration(route.duration_seconds)
+            "{}  ·  {}  ·  {}  ·  {}",
+            self.mode,
+            self.units().distance_km(route.distance_km),
+            UnitSystem::duration(route.duration_seconds),
+            route.name
         )
     }
     fn planner_view(&self, width: f32, height: f32, cx: &mut Context<Self>) -> AnyElement {
-        let available = if self.details {
-            width - 410.
-        } else {
-            width - 280.
-        };
-        let w = available.clamp(300., 820.);
+        // A fixed width keeps the planner from jumping when the Info panel
+        // opens or closes, so that fade stays visually continuous.
+        let w = (width - 410.).clamp(300., 820.);
         let left: f32 = 16.;
         let mut pane = div().min_w_0().w_full().flex().flex_col().gap_3();
         let title =
@@ -1228,7 +1437,16 @@ impl TerraMars {
                         .items_start()
                         .gap_1()
                         .child(heading("Plan a route", 17.))
-                        .child(label(self.projected_time(cx)).text_size(px(14.))),
+                        // Reserved summary line: blank until a route exists, so
+                        // the card keeps one stable height and the planner never
+                        // jumps between its empty and planned states.
+                        .child(
+                            div().h(px(21.)).flex().items_center().child(
+                                label(self.route_summary())
+                                    .text_color(rgb(INK))
+                                    .text_size(px(14.)),
+                            ),
+                        ),
                 )
                 .child(
                     button("toggle-planner", "")
@@ -1260,7 +1478,9 @@ impl TerraMars {
                         })),
                 );
         if self.planner {
-            let mut endpoints = div().flex().items_center().gap_2();
+            // Bottom-align the row so the swap control lines up with the two
+            // endpoint buttons rather than with the midpoint of their labels.
+            let mut endpoints = div().flex().items_end().gap_2();
             for (endpoint, title, location) in [
                 (Endpoint::Start, "A  ·  Start", &self.start),
                 (Endpoint::End, "B  ·  Destination", &self.end),
@@ -1298,14 +1518,14 @@ impl TerraMars {
                     ),
                 );
                 if endpoint == Endpoint::Start {
-                    endpoints = endpoints.child(button("swap", "⇄").mt_4().px_2().on_click(
-                        cx.listener(|this, _, _, cx| {
+                    endpoints = endpoints.child(button("swap", "⇄").px_2().on_click(cx.listener(
+                        |this, _, _, cx| {
                             std::mem::swap(&mut this.start, &mut this.end);
                             this.routes.clear();
                             this.sync_map(cx);
                             cx.notify();
-                        }),
-                    ));
+                        },
+                    )));
                 }
             }
             pane = pane.child(endpoints);
@@ -1330,8 +1550,7 @@ impl TerraMars {
                                             "On foot"
                                         }
                                         .into();
-                                        this.routes.clear();
-                                        this.sync_map(cx);
+                                        this.replan_if_ready(cx);
                                         cx.notify();
                                     },
                                 )),
@@ -1340,9 +1559,8 @@ impl TerraMars {
                                 |this, _, _, cx| {
                                     this.store.state.settings.speed_kmh =
                                         (this.store.state.settings.speed_kmh - 0.5).max(0.5);
-                                    this.routes.clear();
-                                    this.sync_map(cx);
                                     this.save(cx);
+                                    this.replan_if_ready(cx);
                                     cx.notify();
                                 },
                             )))
@@ -1354,9 +1572,8 @@ impl TerraMars {
                                 |this, _, _, cx| {
                                     this.store.state.settings.speed_kmh =
                                         (this.store.state.settings.speed_kmh + 0.5).min(15.);
-                                    this.routes.clear();
-                                    this.sync_map(cx);
                                     this.save(cx);
+                                    this.replan_if_ready(cx);
                                     cx.notify();
                                 },
                             ))),
@@ -1371,6 +1588,7 @@ impl TerraMars {
                                     this.end = None;
                                     this.routes.clear();
                                     this.endpoint_menu = None;
+                                    this.replan_task = None;
                                     this.sync_map(cx);
                                     cx.notify();
                                 },
@@ -1384,108 +1602,117 @@ impl TerraMars {
                                         "Plan route  ↗"
                                     },
                                 )
-                                .on_click(cx.listener(|this, _, _, cx| this.plan(cx))),
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.replan_task = None;
+                                        // Pressing "Plan route" again while the
+                                        // same calculation is in flight would
+                                        // append a second identical mission.
+                                        if !this.planning {
+                                            this.plan(true, cx);
+                                        }
+                                    },
+                                )),
                             ),
                     ),
             );
-            if !self.routes.is_empty() {
-                let mut routes = div().flex().gap_2();
-                for (i, route) in self.routes.iter().enumerate() {
-                    let description = format!(
-                        "{}  ·  {}  ·  {}",
-                        route.name,
-                        self.units().distance_km(route.distance_km),
-                        UnitSystem::duration(route.duration_seconds)
-                    );
-                    routes = routes.child(
-                        button(("route-choice", i), description)
-                            .flex_1()
-                            .truncate()
-                            .text_size(px(15.))
-                            .when(i == self.route_index, |b| {
-                                b.border_color(rgb(ACCENT)).bg(rgba(0xb3aaff18))
-                            })
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if this.route_index != i {
-                                    this.route_index = i;
-                                    this.record_route(cx);
-                                    this.sync_map(cx);
-                                    cx.notify();
-                                }
-                            })),
-                    );
-                }
-                pane = pane.child(routes).child(
-                    div()
-                        .flex()
-                        .justify_between()
-                        .items_center()
-                        .gap_3()
-                        .child(
-                            label("MOLA slope screening · small hazards unassessed")
-                                .flex_1()
-                                .text_size(px(14.)),
-                        )
-                        .child(
-                            button("fit-route", "Fit route")
-                                .py_1()
-                                .min_h(px(30.))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    if let (Some(map), Some(route)) =
-                                        (&this.map, this.routes.get(this.route_index))
-                                    {
-                                        map.update(cx, |map, cx| {
-                                            map.fit_route(&route.points);
-                                            cx.notify();
-                                        });
-                                    }
-                                })),
-                        ),
-                );
-            }
+            if self.fades.routes.present() {}
         }
         div()
             .absolute()
-            .left(px(left.max(16.)))
-            .bottom_4()
-            .child(reveal(
+            .left(px(left.max(HEADER_INSET)))
+            .bottom_3()
+            .child(animation::fade_in(
+                "planner-enter",
                 glass()
                     .occlude()
-                    .p_4()
+                    .p(INSET)
                     .w(px(w))
                     .max_h(px((height - 284.).max(180.)))
                     .flex()
                     .flex_col()
                     .gap_3()
                     .child(title)
-                    .when(self.planner, |card| {
-                        card.child(
-                            div()
-                                .id("planner-scroll")
-                                .occlude()
-                                .min_h_0()
-                                .flex_1()
-                                .max_h(px((height - 410.).max(130.)))
-                                .overflow_y_scroll()
-                                .child(pane),
-                        )
+                    .when(self.fades.planner.present(), |card| {
+                        let open = self.fades.planner.visible();
+                        let generation = self.fades.planner.generation();
+                        let full = (height - 410.).max(130.);
+                        // Freeze the starting height once per transition. The
+                        // measured height is refreshed only while fully open, so
+                        // reading it live inside the animation would make the
+                        // endpoint drift and clip the panel.
+                        if self.planner_gen.get() != generation {
+                            self.planner_gen.set(generation);
+                            self.planner_from.set(self.planner_height.get());
+                        }
+                        let stored = self.planner_from.get();
+                        let from = if stored > 1. { stored } else { full };
+                        // The card is as tall as its content, not as tall as its
+                        // maximum. Collapse from the height actually measured
+                        // while open so every frame changes the size, instead of
+                        // idling under `max_h` and then snapping at the end.
+                        let measured = self.planner_height.clone();
+                        let clip = div()
+                            .id("planner-clip")
+                            .min_h_0()
+                            .overflow_hidden()
+                            .when(open, |clip| {
+                                let measured = measured.clone();
+                                clip.on_prepaint(move |payload, _, _| {
+                                    let h = f32::from(payload.bounds.size.height);
+                                    if h > 0. {
+                                        measured.set(h);
+                                    }
+                                })
+                            })
+                            .with_animation(
+                                ElementId::named_usize("planner-collapse", generation as usize),
+                                Animation::new(animation::COLLAPSE)
+                                    .with_easing(animation::ease_in_out),
+                                move |clip, t| {
+                                    if open {
+                                        // Opening only fades: the content takes
+                                        // its real height at once, so layout and
+                                        // input never lag behind the fade.
+                                        clip.max_h(px(full)).opacity(t)
+                                    } else {
+                                        // Closing animates the measured height,
+                                        // so the shrink is continuous.
+                                        clip.max_h(px(from * (1. - t))).opacity(1. - t)
+                                    }
+                                },
+                            )
+                            .child(
+                                div()
+                                    .id("planner-scroll")
+                                    .occlude()
+                                    .min_h_0()
+                                    .overflow_y_scroll()
+                                    .child(pane),
+                            );
+                        card.child(clip)
                     }),
-                ("planner-enter", 0usize),
-                false,
+                0,
             ))
             .into_any_element()
     }
 
-    fn endpoint_picker(&self, width: f32, height: f32, cx: &mut Context<Self>) -> AnyElement {
-        let endpoint = self.endpoint_menu.unwrap();
-        let w = (width - 420.).clamp(330., 500.);
-        let mut menu = glass()
-            .bg(rgba(0x24252bfa))
+    fn endpoint_picker(
+        &self,
+        endpoint: Endpoint,
+        width: f32,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        // The chooser floats above everything else, so it can use most of the
+        // window: a wider, taller list shows many more candidate locations.
+        let w = (width * 0.62).clamp(460., 820.);
+        let mut menu = solid_panel()
             .w(px(w))
-            .p_4()
+            .p(INSET)
             .flex()
             .flex_col()
-            .gap_2()
+            .gap(SPACE)
             .child(
                 div()
                     .flex()
@@ -1537,7 +1764,9 @@ impl TerraMars {
             .id("landmark-choices")
             .occlude()
             .overflow_y_scroll()
-            .max_h(px(if height < 720. { 105. } else { 205. }))
+            // The chooser is the front-most surface, so the list gets most of
+            // its height: more candidate locations are visible at once.
+            .max_h(px((height * 0.45).clamp(180., 460.)))
             .flex()
             .flex_col()
             .gap_1();
@@ -1599,24 +1828,19 @@ impl TerraMars {
             );
         // Float over the planner so every picker control remains reachable,
         // including after route alternatives increase the planner's height.
-        let bottom = 16.;
-        div()
-            .absolute()
-            .left_5()
-            .bottom(px(bottom))
-            .child(
-                div()
-                    .id("endpoint-popup-scroll")
-                    .occlude()
-                    .max_h(px((height - bottom - 80.).max(160.)))
-                    .overflow_y_scroll()
-                    .rounded(px(10.))
-                    .child(menu.flex_shrink_0()),
-            )
-            .into_any_element()
+        let bottom = 12.;
+        div().absolute().left_3().bottom(px(bottom)).child(
+            div()
+                .id("endpoint-popup-scroll")
+                .occlude()
+                .max_h(px((height - bottom - 12.).max(240.)))
+                .overflow_y_scroll()
+                .rounded(px(10.))
+                .child(menu.flex_shrink_0()),
+        )
     }
 
-    fn details_view(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    fn details_view(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let panel = glass()
             .occlude()
             .w(px(350.))
@@ -1626,7 +1850,7 @@ impl TerraMars {
             .overflow_hidden()
             .child(
                 div()
-                    .p_5()
+                    .p(INSET)
                     .pb_3()
                     .flex()
                     .flex_col()
@@ -1671,28 +1895,26 @@ impl TerraMars {
                             ),
                     ),
             )
-            .child(if self.layers {
-                self.layers_content(cx)
-            } else {
-                self.conditions_content(cx)
-            });
-        let top = 154.;
+            .child(self.fades.tab.animate_in(
+                "details-content",
+                if self.layers {
+                    self.layers_content(cx)
+                } else {
+                    self.conditions_content(cx)
+                },
+            ));
+        let top = f32::from(CONTENT_TOP) + 56.;
         let bottom = 98.;
         let height = f32::from(window.viewport_size().height) - top - bottom;
         div()
             .absolute()
-            .right_4()
+            .right_3()
             .top(px(top))
             .h(px(height.max(150.)))
-            .child(reveal(
-                panel,
-                ("details-enter", self.transition as usize),
-                false,
-            ))
-            .into_any_element()
+            .child(panel)
     }
 
-    fn conditions_content(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn conditions_content(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let site = &self.sites[self.site_index];
         let point = self
             .selection
@@ -1710,8 +1932,8 @@ impl TerraMars {
             .overflow_y_scroll()
             .flex_1()
             .min_h_0()
-            .px_5()
-            .pb_5()
+            .px(INSET)
+            .pb(INSET)
             .flex()
             .flex_col()
             .gap_3();
@@ -1729,17 +1951,14 @@ impl TerraMars {
         let mut forecast = div()
             .flex()
             .flex_col()
+            // One rule between each measured field so values read as separate
+            // categories instead of one run-on block.
             .gap_3()
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .child(heading("Regional weather", 20.))
-                    .child(label("Predicted").text_color(rgb(ORANGE))),
-            )
+            .child(heading("Regional weather", 20.))
             .child(label(
                 "MCD 6.2 · seasonal climate model, not live measurements",
             ));
+        let mut first_field = true;
         for key in [
             "air_temperature",
             "surface_temperature",
@@ -1749,23 +1968,25 @@ impl TerraMars {
             "solar_irradiance",
         ] {
             if let Some(p) = predicted.get(key) {
+                if !first_field {
+                    forecast = forecast.child(rule());
+                }
+                first_field = false;
                 forecast = forecast.child(
                     div()
                         .flex()
                         .justify_between()
-                        .gap_3()
-                        .child(label(p.label).flex_1())
+                        .gap(SPACE)
+                        .py_2()
+                        .child(label(p.label).w(px(112.)).flex_shrink_0())
                         .child(
                             div()
                                 .min_w_0()
                                 .flex_1()
                                 .text_right()
                                 .text_color(rgb(INK))
-                                .text_size(px(17.))
-                                .child(format!(
-                                    "{} · Predicted",
-                                    units.observation(Some(p.value), p.unit)
-                                )),
+                                .text_size(px(14.))
+                                .child(units.observation(Some(p.value), p.unit)),
                         ),
                 );
             }
@@ -2020,7 +2241,7 @@ impl TerraMars {
             cx,
             sources,
         ));
-        content.into_any_element()
+        content
     }
     fn disclosure(
         &self,
@@ -2063,9 +2284,9 @@ impl TerraMars {
         }
         row
     }
-    fn layers_content(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn layers_content(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let Some(map) = &self.map else {
-            return div().into_any_element();
+            return div().id("layers-scroll");
         };
         let options = &map.read(cx).options;
         let mut content = div()
@@ -2073,8 +2294,8 @@ impl TerraMars {
             .occlude()
             .overflow_y_scroll()
             .flex_1()
-            .px_5()
-            .pb_5()
+            .px(INSET)
+            .pb(INSET)
             .flex()
             .flex_col()
             .gap_3();
@@ -2091,7 +2312,7 @@ impl TerraMars {
                     .justify_start()
                     .w_full()
                     .justify_between()
-                    .child(switch_visual(enabled))
+                    .child(switch_visual(id as usize, enabled))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(map) = &this.map {
                             map.update(cx, |map, cx| {
@@ -2115,7 +2336,7 @@ impl TerraMars {
             .child(label("Danger zones derive from numerical MOLA slopes ≥15°. Routes avoid them even when the visual is hidden. Resolution ~463 m; small obstacles and sand are not assessed."))
             .child(label("Night shading uses planetary solar geometry. It does not model terrain shadows."))
             .child(label("Rover waypoints and recorded paths are dated observations, not astronaut routes."))
-            .child(source_button("imagery-credit","NASA map source ↗",self.sites[self.site_index].map_source_url.clone())).into_any_element()
+            .child(source_button("imagery-credit","NASA map source ↗",self.sites[self.site_index].map_source_url.clone()))
     }
 
     fn log(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -2124,11 +2345,31 @@ impl TerraMars {
             .overflow_y_scroll()
             .size_full()
             .p_8()
-            .pt(px(110.))
+            .pt(CONTENT_TOP)
             .flex()
             .flex_col()
-            .gap_5()
-            .child(heading("Mission log", 32.));
+            .gap(SPACE_LOOSE)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(heading("Mission log", 32.))
+                    .when(!self.store.state.planned_routes.is_empty(), |row| {
+                        row.child(button("clear-log", "Clear").flex_shrink_0().on_click(
+                            cx.listener(|this, _, _, cx| {
+                                match this.store.clear_routes() {
+                                    Ok(()) => {
+                                        this.log_preview_open = false;
+                                        this.set_status("Mission log cleared.", cx);
+                                    }
+                                    Err(error) => this.set_status(error.to_string(), cx),
+                                }
+                                cx.notify();
+                            }),
+                        ))
+                    }),
+            );
         if self.store.state.planned_routes.is_empty() {
             content = content.child(
                 glass()
@@ -2145,6 +2386,10 @@ impl TerraMars {
             content = content.child(
                 glass()
                     .id(("open-log-route", i))
+                    // Pointer-test diagnostics address this card by id.
+                    .child(super::interaction::probe(format!(
+                        "NamedInteger(\"open-log-route\", {i})"
+                    )))
                     .flex_shrink_0()
                     .p_5()
                     .flex()
@@ -2154,11 +2399,8 @@ impl TerraMars {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let r = &record_for_open;
                         let map = cx.new(|_| {
-                            let mut map = MapView::new(
-                                this.sites[index].clone(),
-                                index,
-                                this.images.clone(),
-                            );
+                            let mut map =
+                                MapView::new(this.sites[index].clone(), index, this.images.clone());
                             map.units = this.units();
                             map.route = Arc::new(r.route.points.clone());
                             map.start = r.route.points.first().copied();
@@ -2166,41 +2408,34 @@ impl TerraMars {
                             map.fit_route(&r.route.points);
                             map
                         });
-                        cx.subscribe(
-                            &map,
-                            move |this, _, event: &MapSelection, cx| {
-                                this.log_danger = this.images.hazards[index]
-                                    .danger(event.point)
-                                    .map(|_| (index, event.point));
-                                cx.notify();
-                            },
-                        )
+                        cx.subscribe(&map, move |this, _, event: &MapSelection, cx| {
+                            this.log_danger = this.images.hazards[index]
+                                .danger(event.point)
+                                .map(|_| (index, event.point));
+                            cx.notify();
+                        })
                         .detach();
                         this.log_danger = None;
                         this.log_preview = Some(map);
                         this.log_preview_index = Some(i);
+                        this.log_preview_open = true;
                         cx.notify();
                     }))
                     .child(
-                        div()
-                            .flex()
-                            .justify_between()
-                            .items_center()
-                            .gap_3()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .child(label(format!(
-                                        "{} · {} UTC",
-                                        self.sites[index].name,
-                                        record.planned_at.format("%d %b %Y  %H:%M")
-                                    )))
-                                    .child(heading(
-                                        format!("{} → {}", record.start_label, record.end_label),
-                                        21.,
-                                    )),
-                            ),
+                        div().flex().justify_between().items_center().gap_3().child(
+                            div()
+                                .min_w_0()
+                                .flex_1()
+                                .child(label(format!(
+                                    "{} · {} UTC",
+                                    self.sites[index].name,
+                                    record.planned_at.format("%d %b %Y  %H:%M")
+                                )))
+                                .child(heading(
+                                    format!("{} → {}", record.start_label, record.end_label),
+                                    21.,
+                                )),
+                        ),
                     )
                     .child(
                         div()
@@ -2236,6 +2471,25 @@ impl Render for TerraMars {
             self.page_transition += 1;
             self.rendered_page = self.page;
         }
+        // Keep the transient-surface state and the retained snapshots that let
+        // a surface finish its fade-out after its logical data is cleared.
+        if let Some(endpoint) = self.endpoint_menu {
+            self.endpoint_last = endpoint;
+        }
+        if let Some(endpoint) = self.map_pick {
+            self.map_pick_last = endpoint;
+        }
+        if let Some(danger) = self.log_danger {
+            self.log_danger_last = Some(danger);
+        }
+        if !self.routes.is_empty() {
+            self.routes_last = self.routes.clone();
+        }
+        if self.last_layers != self.layers {
+            self.last_layers = self.layers;
+            self.fades.tab.restart();
+        }
+        self.sync_fades(cx);
         let body = match self.page {
             Page::Home => self.home(window, cx),
             Page::Explorer => self.explorer(window, cx),
@@ -2248,11 +2502,12 @@ impl Render for TerraMars {
             .flex_col()
             .bg(rgb(0x0e1016))
             .text_color(rgb(INK))
-            .font_family("Inter")
+            .font_family("Departure Mono")
             .text_size(px(18.))
             .on_key_down(cx.listener(|this, event, window, cx| this.keyboard(event, window, cx)))
             .relative()
-            .child(
+            .child(animation::fade_in(
+                "page-enter",
                 div()
                     .relative()
                     .size_full()
@@ -2260,23 +2515,20 @@ impl Render for TerraMars {
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .child(body)
-                    .with_animation(
-                        ("page-enter", self.page_transition as usize),
-                        Animation::new(Duration::from_millis(220))
-                            .with_easing(|t| 1. - (1. - t).powi(3)),
-                        |view, t| view.opacity(t).top(px((1. - t) * 10.)),
-                    ),
-            )
+                    .child(body),
+                self.page_transition,
+            ))
             .child(
                 div()
                     .absolute()
                     .top_0()
                     .left_0()
                     .w_full()
+                    .p_3()
                     .child(self.header(window, cx)),
             );
         if self.page == Page::Log
+            && self.fades.preview.present()
             && let Some(preview) = &self.log_preview
         {
             let width = (f32::from(window.viewport_size().width) - 64.).min(1100.);
@@ -2298,16 +2550,16 @@ impl Render for TerraMars {
                     )
                 })
                 .unwrap_or_default();
-            app = app.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .occlude()
-                    .bg(rgba(0x080b1060))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
+            let fit_points = record.map(|r| r.route.points.clone());
+            let modal = div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .bg(rgba(0x080b1060))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
                         glass()
                             .w(px(width))
                             .h(px(height))
@@ -2316,15 +2568,18 @@ impl Render for TerraMars {
                             .flex_col()
                             .child(
                                 div()
-                                    .p_4()
+                                    .p(INSET)
                                     .flex()
                                     .items_center()
                                     .justify_between()
-                                    .gap_4()
+                                    .gap(SPACE)
                                     .child(
                                         div()
                                             .min_w_0()
                                             .flex_1()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(SPACE_TIGHT)
                                             .child(heading("Saved route", 22.))
                                             .child(label(title))
                                             .child(label(summary).text_size(px(14.))),
@@ -2332,40 +2587,104 @@ impl Render for TerraMars {
                                     .child(
                                         button("close-log-preview", "Close").child("×").on_click(
                                             cx.listener(|this, _, _, cx| {
-                                                this.log_preview = None;
-                                                this.log_preview_index = None;
+                                                // Keep the map and record alive so the
+                                                // modal can fade out before it is reused.
+                                                this.log_preview_open = false;
                                                 cx.notify();
                                             }),
                                         ),
                                     ),
                             )
                             .child(
+                                div().flex_1().w_full().px(INSET).pb(INSET).child(
                                 div()
                                     .relative()
-                                    .flex_1()
-                                    .w_full()
+                                    .size_full()
+                                    .rounded(px(10.))
                                     .overflow_hidden()
                                     .child(preview.clone())
-                                    .when_some(self.log_danger, |view, (index,p)| {
-                                        let grid=&self.images.hazards[index];
-                                        let Some((_,slope))=grid.danger(p) else {return view;};
-                                        view.child(div().absolute().top_4().left_4().child(glass().id("log-danger-scroll").occlude().w(px((width-48.).min(330.))).max_h(px((height-180.).max(140.))).overflow_y_scroll().p_4().flex().flex_col().gap_2()
+                                    // Same camera toolbar as the Explorer map:
+                                    // zoom in/out and refit the saved route.
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .left_3()
+                                            .bottom_3()
+                                            .flex()
+                                            .gap(SPACE_TIGHT)
+                                            .child(map_button("log-zoom-in", "+").on_click({
+                                                let preview = preview.clone();
+                                                cx.listener(move |_, _, _, cx| {
+                                                    preview.update(cx, |m, cx| {
+                                                        m.zoom(1.35);
+                                                        cx.notify();
+                                                    });
+                                                })
+                                            }))
+                                            .child(map_button("log-zoom-out", "−").on_click({
+                                                let preview = preview.clone();
+                                                cx.listener(move |_, _, _, cx| {
+                                                    preview.update(cx, |m, cx| {
+                                                        m.zoom(1. / 1.35);
+                                                        cx.notify();
+                                                    });
+                                                })
+                                            }))
+                                            .child(
+                                                map_button("log-fit-map", icon("route")).on_click({
+                                                    let preview = preview.clone();
+                                                    let points = fit_points.clone();
+                                                    cx.listener(move |_, _, _, cx| {
+                                                        preview.update(cx, |m, cx| {
+                                                            match &points {
+                                                                Some(points) => {
+                                                                    m.fit_route(points)
+                                                                }
+                                                                None => m.fit(),
+                                                            }
+                                                            cx.notify();
+                                                        });
+                                                    })
+                                                }),
+                                            ),
+                                    )
+                                    .when(self.fades.danger.present(), |view| {
+                                        let Some((index, p)) =
+                                            self.log_danger.or(self.log_danger_last)
+                                        else {
+                                            return view;
+                                        };
+                                        let grid = &self.images.hazards[index];
+                                        let Some((_, slope)) = grid.danger(p) else {
+                                            return view;
+                                        };
+                                        let popover = div().absolute().top_3().left_3().child(glass().id("log-danger-scroll").occlude().w(px((width-48.).min(330.))).max_h(px((height-180.).max(140.))).overflow_y_scroll().p_4().flex().flex_col().gap_2()
                                             .child(div().flex().items_center().justify_between().gap_2().child(heading(format!("Steep terrain · {:.1}°",slope),18.)).child(button("close-log-danger","×").px_2().on_click(cx.listener(|this,_,_,cx|{this.log_danger=None;cx.notify();}))))
                                             .child(label("Slipping / rollover risk. Terrain-aware plans exclude slopes ≥15° at MOLA’s ~463 m scale. Small obstacles and sand traps remain unassessed."))
-                                            .child(source_button("log-danger-source","NASA MOLA source ↗",grid.metadata.source_url.clone()))))
+                                            .child(source_button("log-danger-source","NASA MOLA source ↗",grid.metadata.source_url.clone())));
+                                        view.child(self.fades.danger.element("log-danger", popover))
                                     }),
+                                ),
                             ),
-                    ),
-            );
+                    );
+            app = app.child(self.fades.preview.element("log-preview", modal));
         }
-        if !self.status.is_empty() {
-            let mut toast = glass()
+        if self.fades.toast.present() {
+            let mut toast = notice_panel()
+                .id("status-toast")
                 .occlude()
                 .w(px((f32::from(window.viewport_size().width) - 32.).min(460.)))
                 .p_4()
                 .flex()
                 .flex_col()
                 .gap_3()
+                // Any attention pins the notification; only the close control
+                // removes it once pinned.
+                .on_hover(cx.listener(|this, hovered, _, cx| {
+                    if *hovered {
+                        this.pin_status(cx);
+                    }
+                }))
                 .child(
                     div()
                         .flex()
@@ -2379,13 +2698,11 @@ impl Render for TerraMars {
                                 .text_size(px(16.))
                                 .child(self.status.clone()),
                         )
-                        .child(button("dismiss-status", "×").px_3().on_click(cx.listener(
-                            |this, _, _, cx| {
-                                this.status.clear();
-                                this.refresh_expanded = false;
-                                cx.notify();
-                            },
-                        ))),
+                        .child(
+                            button("dismiss-status", "×")
+                                .px_3()
+                                .on_click(cx.listener(|this, _, _, cx| this.dismiss_status(cx))),
+                        ),
                 );
             if self.status.starts_with("NASA") && !self.refresh_notes.is_empty() {
                 toast = toast.child(
@@ -2399,25 +2716,29 @@ impl Render for TerraMars {
                     )
                     .justify_start()
                     .on_click(cx.listener(|this, _, _, cx| {
+                        this.pin_status(cx);
                         this.refresh_expanded = !this.refresh_expanded;
                         cx.notify();
                     })),
                 );
-                if self.refresh_expanded {
+                if self.fades.notes.present() {
                     toast = toast.child(
-                        div()
-                            .id("refresh-notes-scroll")
-                            .occlude()
-                            .max_h(px(160.))
-                            .overflow_y_scroll()
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .children(
-                                self.refresh_notes
-                                    .iter()
-                                    .map(|n| label(n.clone()).text_size(px(14.))),
-                            ),
+                        self.fades.notes.element(
+                            "refresh-notes",
+                            div()
+                                .id("refresh-notes-scroll")
+                                .occlude()
+                                .max_h(px(160.))
+                                .overflow_y_scroll()
+                                .flex()
+                                .flex_col()
+                                .gap_3()
+                                .children(
+                                    self.refresh_notes
+                                        .iter()
+                                        .map(|n| label(n.clone()).text_size(px(14.))),
+                                ),
+                        ),
                     );
                 }
             }
@@ -2426,20 +2747,24 @@ impl Render for TerraMars {
             app = app.child(
                 div()
                     .absolute()
-                    .top(px(90.))
+                    .top(CONTENT_TOP)
                     .left(px((viewport - toast_width) / 2.))
-                    .child(toast.w(px(toast_width))),
+                    .child(
+                        self.fades
+                            .toast
+                            .element("status-toast-fade", toast.w(px(toast_width))),
+                    ),
             );
         }
         if super::interaction::enabled() {
             super::interaction::capture(serde_json::json!({
                 "page":match self.page{Page::Home=>"home",Page::Explorer=>"explorer",Page::Log=>"log"},
-                "log_preview":self.log_preview.is_some(),"browse_page":if self.browse_page==Page::Explorer{"explorer"}else{"home"},"planner":self.planner,"details":self.details,"layers":self.layers,"endpoint_menu":self.endpoint_menu.map(|e|format!("{e:?}")),
+                "log_preview":self.log_preview_open,"browse_page":if self.browse_page==Page::Explorer{"explorer"}else{"home"},"planner":self.planner,"details":self.details,"layers":self.layers,"endpoint_menu":self.endpoint_menu.map(|e|format!("{e:?}")),
                 "selected":self.selection.as_ref().map(|l|l.point),"start":self.start.as_ref().map(|l|l.point),"end":self.end.as_ref().map(|l|l.point),
-                "danger_selected":self.selection.as_ref().and_then(|l|self.images.hazards[self.site_index].danger(l.point)).is_some(),"projected_time":self.projected_time(cx),"coordinate_text":self.coordinate_text,"coordinate_editing":self.coordinate_editing,"log_count":self.store.state.planned_routes.len(),"route_count":self.routes.len(),"units":self.units().label(),"earth":self.clock.read(cx).earth,
+                "rover":self.sites[self.site_index].rover().map(|l|serde_json::json!({"lat":l.point.latitude,"lon":l.point.longitude,"sol":l.sol})),"danger_selected":self.selection.as_ref().and_then(|l|self.images.hazards[self.site_index].danger(l.point)).is_some(),"projected_time":self.route_summary(),"coordinate_text":self.coordinate_text,"coordinate_editing":self.coordinate_editing,"log_count":self.store.state.planned_routes.len(),"route_count":self.routes.len(),"units":self.units().label(),"earth":self.clock.read(cx).earth,
                 "camera_center":self.map.as_ref().map(|m| {let v=m.read(cx);let c=v.camera.borrow();[c.x,c.y]}),"bearing":self.map.as_ref().map(|m|m.read(cx).camera.borrow().bearing),"zoom":self.map.as_ref().map(|m|m.read(cx).camera.borrow().zoom),"map_options":self.map.as_ref().map(|m|{
                     let o=&m.read(cx).options;serde_json::json!({"terrain":o.terrain,"rover":o.rover,"landmarks":o.landmarks,"traverse":o.traverse,"night":o.terminator,"dangers":o.dangers})
-                }),"status":self.status,"refreshing":self.refreshing,"refresh_expanded":self.refresh_expanded,
+                }),"status":if self.status_open{self.status.clone()}else{String::new()},"refreshing":self.refreshing,"refresh_expanded":self.refresh_expanded,
             }));
             app = app.child(super::interaction::flush());
         }
@@ -2513,23 +2838,29 @@ pub fn run() -> anyhow::Result<()> {
         .and_then(|(w, h)| Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?)))
         .filter(|(w, h)| w.is_finite() && h.is_finite())
         .map(|(w, h)| size(px(w.max(800.)), px(h.max(600.))))
-        .unwrap_or_else(|| size(px(1440.), px(940.)));
+        .unwrap_or_else(|| size(px(1200.), px(800.)));
     gpui_platform::application()
         .with_assets(super::assets::EmbeddedAssets)
         .run(move |cx: &mut App| {
+            // Orbitron carries every heading; Departure Mono carries all body
+            // copy, labels and controls. Sizes stay unchanged so the existing
+            // layout rhythm is preserved.
             cx.text_system()
                 .add_fonts(vec![
                     std::borrow::Cow::Borrowed(include_bytes!(
-                        "../../assets/fonts/Inter-Regular.ttf"
+                        "../../assets/fonts/DepartureMono-1.500/DepartureMono-Regular.otf"
                     )),
                     std::borrow::Cow::Borrowed(include_bytes!(
-                        "../../assets/fonts/Inter-SemiBold.ttf"
+                        "../../assets/fonts/Orbitron/static/Orbitron-Regular.ttf"
                     )),
                     std::borrow::Cow::Borrowed(include_bytes!(
-                        "../../assets/fonts/Manrope-Bold.ttf"
+                        "../../assets/fonts/Orbitron/static/Orbitron-Medium.ttf"
                     )),
                     std::borrow::Cow::Borrowed(include_bytes!(
-                        "../../assets/fonts/Manrope-SemiBold.ttf"
+                        "../../assets/fonts/Orbitron/static/Orbitron-SemiBold.ttf"
+                    )),
+                    std::borrow::Cow::Borrowed(include_bytes!(
+                        "../../assets/fonts/Orbitron/static/Orbitron-Bold.ttf"
                     )),
                 ])
                 .expect("Embedded fonts should be valid");

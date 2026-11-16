@@ -190,7 +190,7 @@ pub(crate) fn estimate(
     }
 }
 
-fn nearest_index(point: Point, line: &[Point]) -> usize {
+pub(crate) fn nearest_index(point: Point, line: &[Point]) -> usize {
     line.iter()
         .enumerate()
         .min_by(|(_, a), (_, b)| {
