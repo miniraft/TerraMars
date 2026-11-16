@@ -6,3 +6,11 @@ Download the file for your platform from a successful **Desktop builds** run in 
 Assets and license notices are embedded. Run the executable with `--export-licenses <file>` to save the bundled font and GPUI notices. See [native build details](docs/RUST_MIGRATION.md#native-builds).
 
 GitHub Actions builds Linux, macOS and Windows for both x86_64 and ARM64. The macOS deployment minimum is Catalina 10.15 for Intel and Big Sur 11.0 for Apple Silicon.
+
+## Voice control
+
+An optional offline voice assistant (vox) can be built with
+`cargo build --features voice-vox`. It lets you plan routes, check conditions,
+change units/time/map layers, zoom, and scroll by speaking. See
+[docs/VOICE_CONTROL.md](docs/VOICE_CONTROL.md) for the command list and model
+setup.

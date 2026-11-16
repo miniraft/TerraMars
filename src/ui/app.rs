@@ -12,6 +12,8 @@ use terramars::{
     domain::{self, *},
     services,
 };
+use terramars::services::voice::{VoiceCommand, VoiceCommandQueue};
+use terramars::services::voice_pipeline::VoicePipeline;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
@@ -72,6 +74,17 @@ pub struct TerraMars {
     rendered_page: Page,
     planning: bool,
     planning_version: u64,
+    /// Optional local voice pipeline (vox). None when the `voice-vox`
+    /// feature is disabled or the pipeline failed to start.
+    voice_pipeline: Option<VoicePipeline>,
+    /// Commands recognized by the voice pipeline, drained by the UI loop.
+    voice_queue: VoiceCommandQueue,
+    /// Whether hands-free voice control is currently enabled.
+    voice_enabled: bool,
+    /// Scroll handle for the conditions detail panel (voice scroll-to).
+    conditions_scroll_handle: ScrollHandle,
+    /// Requested voice scroll target ("air low", "air high", ...).
+    voice_scroll_target: Option<String>,
 }
 
 struct Panorama {
@@ -142,6 +155,7 @@ impl TerraMars {
             }
         })
         .detach();
+        let voice_queue = VoiceCommandQueue::new();
         Self {
             climate: domain::climate::ClimateModel::bundled().expect("Validated climate grids"),
             sites,
@@ -183,6 +197,11 @@ impl TerraMars {
             rendered_page: Page::Home,
             planning: false,
             planning_version: 0,
+            voice_pipeline: None,
+            voice_queue,
+            voice_enabled: false,
+            conditions_scroll_handle: ScrollHandle::default(),
+            voice_scroll_target: None,
         }
     }
     fn units(&self) -> UnitSystem {
@@ -639,6 +658,269 @@ impl TerraMars {
             }
         }
     }
+
+    /// Drain the voice command queue and apply each command to the app state.
+    fn handle_voice_commands(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut commands = Vec::new();
+        self.voice_queue.drain(&mut commands);
+        for command in commands {
+            self.voice_command(window, cx, command);
+        }
+    }
+
+    /// Execute a single recognized voice command.
+    fn voice_command(&mut self, _window: &mut Window, cx: &mut Context<Self>, command: VoiceCommand) {
+        if !self.voice_enabled && !matches!(command, VoiceCommand::StopListening) {
+            return;
+        }
+        use VoiceCommand::*;
+        match command {
+            PlanRoute => self.plan(cx),
+            SpeakRoute => self.speak_route(),
+            SpeakConditions => self.speak_conditions(),
+            StartHere => {
+                if let Some(selection) = &self.selection {
+                    self.set_endpoint(Endpoint::Start, selection.clone(), cx);
+                } else {
+                    self.set_status("No map point selected. Inspect the map first.", cx);
+                }
+            }
+            EndHere => {
+                if let Some(selection) = &self.selection {
+                    self.set_endpoint(Endpoint::End, selection.clone(), cx);
+                } else {
+                    self.set_status("No map point selected. Inspect the map first.", cx);
+                }
+            }
+            SwapEndpoints => {
+                std::mem::swap(&mut self.start, &mut self.end);
+                self.routes.clear();
+                self.sync_map(cx);
+                cx.notify();
+            }
+            ModeOnFoot => {
+                self.mode = "On foot".into();
+                self.routes.clear();
+                self.sync_map(cx);
+                cx.notify();
+            }
+            ModeRover => {
+                self.mode = "Rover".into();
+                self.routes.clear();
+                self.sync_map(cx);
+                cx.notify();
+            }
+            SpeedUp => {
+                self.store.state.settings.speed_kmh =
+                    (self.store.state.settings.speed_kmh + 0.5).min(15.0);
+                self.routes.clear();
+                self.sync_map(cx);
+                self.save(cx);
+                cx.notify();
+            }
+            SpeedDown => {
+                self.store.state.settings.speed_kmh =
+                    (self.store.state.settings.speed_kmh - 0.5).max(0.5);
+                self.routes.clear();
+                self.sync_map(cx);
+                self.save(cx);
+                cx.notify();
+            }
+            SetSpeed(kmh) => {
+                if kmh.is_finite() && kmh > 0.0 && kmh <= 15.0 {
+                    self.store.state.settings.speed_kmh = kmh;
+                    self.routes.clear();
+                    self.sync_map(cx);
+                    self.save(cx);
+                    cx.notify();
+                } else {
+                    self.set_status("Speed must be between 0.5 and 15 km/h.", cx);
+                }
+            }
+            UnitsMetric => self.set_units(UnitSystem::Metric, cx),
+            UnitsScientific => self.set_units(UnitSystem::Scientific, cx),
+            TimeUtc => {
+                self.clock.update(cx, |clock, cx| {
+                    clock.earth = true;
+                    cx.emit(TimeToggled(true));
+                    cx.notify();
+                });
+            }
+            TimeAmt => {
+                self.clock.update(cx, |clock, cx| {
+                    clock.earth = false;
+                    cx.emit(TimeToggled(false));
+                    cx.notify();
+                });
+            }
+            OpenInfo => {
+                self.details = true;
+                cx.notify();
+            }
+            ShowConditions => {
+                self.layers = false;
+                cx.notify();
+            }
+            ShowVisuals => {
+                self.layers = true;
+                cx.notify();
+            }
+            OpenJezero => self.open_site(0, cx),
+            OpenGale => self.open_site(1, cx),
+            OpenMissionLog => {
+                self.page = Page::Log;
+                cx.notify();
+            }
+            ZoomIn => {
+                if let Some(m) = &self.map {
+                    m.update(cx, |m, cx| {
+                        m.zoom(1.35);
+                        cx.notify();
+                    });
+                }
+            }
+            ZoomOut => {
+                if let Some(m) = &self.map {
+                    m.update(cx, |m, cx| {
+                        m.zoom(1.0 / 1.35);
+                        cx.notify();
+                    });
+                }
+            }
+            BearingNorth => self.set_map_bearing(0.0, cx),
+            BearingEast => self.set_map_bearing(std::f32::consts::FRAC_PI_2, cx),
+            BearingSouth => self.set_map_bearing(std::f32::consts::PI, cx),
+            BearingWest => self.set_map_bearing(3.0 * std::f32::consts::FRAC_PI_2, cx),
+            ScrollUp => {
+                self.expanded.clear();
+                self.voice_scroll_target = Some("up".into());
+                cx.notify();
+            }
+            ScrollDown => {
+                self.expanded.insert("HISTORICAL STATION RECORDS".into());
+                self.expanded.insert("Weather".into());
+                self.voice_scroll_target = Some("down".into());
+                cx.notify();
+            }
+            ScrollToAirLow => {
+                self.voice_scroll_target = Some("air low".into());
+                self.expand_station_records(cx);
+            }
+            ScrollToAirHigh => {
+                self.voice_scroll_target = Some("air high".into());
+                self.expand_station_records(cx);
+            }
+            ToggleTerrain => self.toggle_layer(0, cx),
+            ToggleLandmarks => self.toggle_layer(1, cx),
+            ToggleRover => self.toggle_layer(2, cx),
+            ToggleTraverse => self.toggle_layer(3, cx),
+            ToggleTerminator => self.toggle_layer(4, cx),
+            ToggleDangers => self.toggle_layer(5, cx),
+            StopListening => {
+                self.voice_enabled = false;
+                cx.notify();
+            }
+            Unknown(text) => {
+                self.set_status(format!("Voice command not recognized: {text}"), cx);
+            }
+        }
+    }
+
+    fn set_map_bearing(&mut self, radians: f32, cx: &mut Context<Self>) {
+        if let Some(m) = &self.map {
+            m.update(cx, |m, cx| {
+                m.set_bearing(radians);
+                cx.notify();
+            });
+        }
+    }
+
+    fn toggle_layer(&mut self, id: usize, cx: &mut Context<Self>) {
+        if let Some(m) = &self.map {
+            m.update(cx, |m, cx| {
+                let o = &mut m.options;
+                match id {
+                    0 => o.terrain = !o.terrain,
+                    1 => o.landmarks = !o.landmarks,
+                    2 => o.rover = !o.rover,
+                    3 => o.traverse = !o.traverse,
+                    4 => o.terminator = !o.terminator,
+                    _ => o.dangers = !o.dangers,
+                }
+                cx.notify();
+            });
+        }
+        cx.notify();
+    }
+
+    /// Expand the historical station records disclosure so Air low / Air high
+    /// are visible in the conditions panel.
+    fn expand_station_records(&mut self, cx: &mut Context<Self>) {
+        self.expanded.insert("HISTORICAL STATION RECORDS".into());
+        cx.notify();
+    }
+
+    /// Build a short spoken summary of the selected route and say it aloud.
+    fn speak_route(&self) {
+        let pipeline = match &self.voice_pipeline {
+            Some(p) => p,
+            None => return,
+        };
+        let Some(route) = self.routes.get(self.route_index) else {
+            pipeline.speak("No route planned yet.");
+            return;
+        };
+        let site = &self.sites[self.site_index];
+        let start = self
+            .start
+            .as_ref()
+            .map(|l| l.label.as_str())
+            .unwrap_or("start");
+        let end = self
+            .end
+            .as_ref()
+            .map(|l| l.label.as_str())
+            .unwrap_or("destination");
+        let distance = self.units().distance_km(route.distance_km);
+        let duration = UnitSystem::duration(route.duration_seconds);
+        let text = format!(
+            "Route from {start} to {end} at {site}: {distance}, about {duration}, {mode} mode.",
+            site = site.name,
+            mode = self.mode
+        );
+        pipeline.speak(text);
+    }
+
+    /// Build a short spoken summary of conditions at the selected point.
+    fn speak_conditions(&self) {
+        let pipeline = match &self.voice_pipeline {
+            Some(p) => p,
+            None => return,
+        };
+        let site = &self.sites[self.site_index];
+        let point = self
+            .selection
+            .as_ref()
+            .map(|l| l.point)
+            .unwrap_or_else(|| site.center());
+        let mars = MarsClock::at(Utc::now(), point.longitude, point.latitude);
+        let predicted = self
+            .climate
+            .predict(&site.id, mars.solar_longitude, mars.local_true_hours);
+        let mut parts: Vec<String> = Vec::new();
+        for key in ["air_temperature", "wind_speed", "pressure"] {
+            if let Some(p) = predicted.get(key) {
+                parts.push(format!("{} {}", p.label, self.units().observation(Some(p.value), p.unit)));
+            }
+        }
+        if parts.is_empty() {
+            pipeline.speak(&format!("No conditions modeled for {} right now.", site.name));
+        } else {
+            let text = format!("Conditions at {}: {}. Predicted.", site.name, parts.join(", "));
+            pipeline.speak(text);
+        }
+    }
+
     fn refresh(&mut self, cx: &mut Context<Self>) {
         if self.refreshing {
             return;
@@ -926,6 +1208,37 @@ impl TerraMars {
                             .px_3()
                             .child(icon("refresh"))
                             .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                    )
+                    .child(
+                        button(
+                            "voice-toggle",
+                            if self.voice_enabled { "Voice ●" } else { "Voice ○" },
+                        )
+                        .px_3()
+                        .when(self.voice_enabled, |b| {
+                            b.text_color(rgb(ORANGE)).border_color(rgba(0xff945e99))
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if !this.voice_enabled {
+                                this.voice_pipeline =
+                                    VoicePipeline::start(this.voice_queue.clone()).ok();
+                                if this.voice_pipeline.is_none() {
+                                    this.set_status(
+                                        "Voice control unavailable: start with --features voice-vox and provide models/.",
+                                        cx,
+                                    );
+                                    cx.notify();
+                                    return;
+                                }
+                            }
+                            this.voice_enabled = !this.voice_enabled;
+                            if this.voice_enabled {
+                                this.set_status("Voice control enabled.", cx);
+                            } else {
+                                this.set_status("Voice control disabled.", cx);
+                            }
+                            cx.notify();
+                        })),
                     )
                     .child(self.clock.clone()),
             )
@@ -1719,6 +2032,7 @@ impl TerraMars {
             .id("conditions-scroll")
             .occlude()
             .overflow_y_scroll()
+            .track_scroll(&self.conditions_scroll_handle)
             .flex_1()
             .min_h_0()
             .px_5()
@@ -2245,6 +2559,7 @@ impl TerraMars {
 impl Render for TerraMars {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let _timing = performance::render_scope();
+        self.handle_voice_commands(window, cx);
         if self.rendered_page != self.page {
             self.page_transition += 1;
             self.rendered_page = self.page;

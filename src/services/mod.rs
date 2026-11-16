@@ -4,3 +4,4 @@
 pub mod export;
 pub mod nasa;
 pub mod voice;
+pub mod voice_pipeline;

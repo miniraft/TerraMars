@@ -338,6 +338,15 @@ impl MapView {
             ..c
         });
     }
+
+    /// Set the map compass bearing directly (radians, clockwise from north).
+    pub fn set_bearing(&mut self, radians: f32) {
+        self.cancel_animation();
+        let mut c = *self.camera.borrow();
+        c.bearing = radians;
+        c.clamp();
+        self.animate_to(c);
+    }
     pub fn update_site(&mut self, site: MissionSite) {
         self.traverse = Arc::new(
             site.traverse

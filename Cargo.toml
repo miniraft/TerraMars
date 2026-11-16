@@ -19,6 +19,15 @@ serde_json = "1"
 env_logger = "0.11"
 log = "0.4"
 
+# Optional: local voice AI (https://github.com/mrtozner/vox).
+# Enable with `cargo build --features voice-vox` and provide models/.
+vox = { git = "https://github.com/mrtozner/vox", optional = true, features = ["whisper", "silero", "kokoro", "tts"] }
+tokio = { version = "1", optional = true, features = ["full"] }
+
+[features]
+default = []
+voice-vox = ["dep:vox", "dep:tokio"]
+
 [build-dependencies]
 embed-resource = "3.0"
 image = { version = "0.25", default-features = false, features = ["png", "ico"] }
